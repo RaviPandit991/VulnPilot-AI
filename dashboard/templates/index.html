@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>VulnPilot AI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>VulnPilot AI</h1>
+    <span class="tag">authorized testing only</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>New Scan</h2>
+      <form id="scan-form">
+        <label>Target IP / hostname
+          <input name="target" required placeholder="192.168.56.101" />
+        </label>
+        <label>Operator
+          <input name="operator" required placeholder="alice@corp" />
+        </label>
+        <label>Mode
+          <select name="mode">
+            <option value="safe" selected>safe</option>
+            <option value="audit">audit</option>
+          </select>
+        </label>
+        <label>Written authorization ref
+          <input name="authorization_ref" placeholder="SOW-2026-001" />
+        </label>
+        <button type="submit">Queue scan</button>
+      </form>
+      <div id="form-status" class="status"></div>
+    </section>
+
+    <section class="card">
+      <h2>Recent Scans</h2>
+      <table id="scans-table">
+        <thead>
+          <tr><th>ID</th><th>Target</th><th>Operator</th><th>Mode</th><th>Status</th><th>Started</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card" id="detail-card" hidden>
+      <h2>Scan Detail</h2>
+      <pre id="detail"></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

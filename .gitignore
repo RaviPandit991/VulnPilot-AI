@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Project artifacts
+data/
+*.db
+*.sqlite
+*.sqlite3
+reports/
+logs/
+*.log
+
+# Secrets
+.env
+configs/secrets.yaml
