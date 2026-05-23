@@ -166,7 +166,7 @@
       </div>
     </section>
 
-    {# -- SCOPE PANEL -- #}
+    {# -- SCOPE & ACTIONS PANEL  (split into Scope and Exploit tabs) -- #}
     <section class="panel flex flex-col min-h-0">
       <div class="panel-header px-4 py-3 flex items-center justify-between">
         <div class="flex items-center gap-2">
@@ -175,12 +175,39 @@
           <h2 class="text-sm font-semibold tracking-wide">SCOPE & ACTIONS</h2>
           <span class="text-xs text-slate-500" x-text="scopeCount() + ' in scope'"></span>
         </div>
-        <button class="btn btn-ghost !py-1" :disabled="!scopeCount()" @click="runAllChecks()">
+        <button class="btn btn-ghost !py-1"
+                x-show="activeTab==='scope'"
+                :disabled="!scopeCount()" @click="runAllChecks()">
           <i data-lucide="zap" class="w-3 h-3"></i> Run All Safe Checks
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-3 space-y-2">
+      {# Tab strip - inside the panel, between header and body #}
+      <div class="border-b border-ink-700/60 px-3 flex items-center gap-1 text-xs">
+        <button class="px-3 py-2 -mb-px border-b-2 transition flex items-center gap-1.5"
+                :class="activeTab==='scope'
+                          ? 'border-cyan-400 text-cyan-300'
+                          : 'border-transparent text-slate-500 hover:text-slate-300'"
+                @click="activeTab='scope'">
+          <i data-lucide="shield-check" class="w-3 h-3"></i>
+          Scope & Actions
+        </button>
+        <button class="px-3 py-2 -mb-px border-b-2 transition flex items-center gap-1.5"
+                :class="activeTab==='exploit'
+                          ? 'border-red-400 text-red-300'
+                          : 'border-transparent text-slate-500 hover:text-slate-300'"
+                @click="activeTab='exploit'">
+          <i data-lucide="zap" class="w-3 h-3"></i>
+          Exploit
+          <span x-show="!exploitsAllowed"
+                class="ml-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[0.6rem] font-bold">
+            DISABLED
+          </span>
+        </button>
+      </div>
+
+      {# ----- TAB 1: Scope & Actions  (original content, unchanged) ----- #}
+      <div x-show="activeTab==='scope'" class="flex-1 overflow-y-auto p-3 space-y-2">
         <template x-for="svc in scopedServices()" :key="svc.id">
           <div class="bg-ink-900/60 border border-cyan-500/20 rounded-md hover:border-cyan-500/40 transition">
             <div class="flex items-center justify-between p-3">
@@ -232,6 +259,91 @@
         <template x-if="!scopeCount()">
           <div class="text-slate-600 text-xs italic text-center py-12">
             Tick a service in the table to add it to scope.
+          </div>
+        </template>
+      </div>
+
+      {# ----- TAB 2: Exploit  (new - destructive, gated by env var) ----- #}
+      <div x-show="activeTab==='exploit'" class="flex-1 overflow-y-auto p-3 space-y-2">
+
+        {# Disabled-mode banner: shown until VULNPILOT_ALLOW_EXPLOIT=1 #}
+        <div x-show="!exploitsAllowed"
+             class="bg-amber-500/10 border border-amber-500/30 rounded-md p-3 text-xs text-amber-200">
+          <div class="flex items-center gap-2 mb-1">
+            <i data-lucide="alert-triangle" class="w-4 h-4 shrink-0"></i>
+            <span class="font-semibold">Exploit mode is disabled.</span>
+          </div>
+          <div class="text-amber-300/80 leading-relaxed">
+            Run-buttons stay locked until you set
+            <code class="font-mono bg-ink-950/60 px-1 rounded">VULNPILOT_ALLOW_EXPLOIT=1</code>
+            in the shell that launches the dashboard, then restart it.
+            This guard is intentional - exploit modules are destructive
+            and may crash, alter, or backdoor the target.
+          </div>
+        </div>
+
+        {# Always-on warning when exploit mode IS enabled #}
+        <div x-show="exploitsAllowed"
+             class="bg-red-500/10 border border-red-500/30 rounded-md p-2 text-[0.7rem] text-red-200 flex items-center gap-2">
+          <i data-lucide="flame" class="w-3.5 h-3.5 shrink-0"></i>
+          <span>Exploit mode <span class="font-semibold">ARMED</span>. Every Run hits the live target and is logged with safe_mode=false.</span>
+        </div>
+
+        {# Per-service exploit cards #}
+        <template x-for="svc in scopedServices()" :key="'exp-' + svc.id">
+          <div class="rounded-md transition"
+               :class="svc.recommended_exploit_module === 'manual review'
+                         ? 'bg-ink-900/40 border border-ink-700/60'
+                         : 'bg-red-950/20 border border-red-500/30 hover:border-red-500/60'">
+            <div class="flex items-center justify-between p-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="font-mono text-cyan-300 shrink-0"
+                      x-text="svc.port + '/' + svc.protocol"></span>
+                <span class="font-semibold shrink-0" x-text="svc.name"></span>
+                <span class="text-xs text-slate-400 truncate"
+                      x-text="(svc.product || '') + ' ' + (svc.version || '')"></span>
+              </div>
+              <span class="shrink-0 text-[0.6rem] uppercase tracking-wider px-2 py-0.5 rounded font-bold"
+                    :class="svc.recommended_exploit_module === 'manual review'
+                              ? 'bg-ink-700/60 text-slate-400'
+                              : 'bg-red-500/20 text-red-300'"
+                    x-text="svc.recommended_exploit_module === 'manual review' ? 'NO MODULE' : 'TARGET LOCKED'"></span>
+            </div>
+
+            <div class="px-3 pb-2 text-xs">
+              <div class="text-[0.6rem] uppercase tracking-wider text-slate-500 mb-1">
+                Recommended Exploit
+              </div>
+              <code class="font-mono text-amber-300 block break-all"
+                    x-text="svc.recommended_exploit_module"></code>
+            </div>
+
+            <div class="px-3 pb-3 flex flex-wrap gap-1.5">
+              <button class="btn btn-ghost !py-1 !px-2"
+                      :disabled="svc.recommended_exploit_module === 'manual review' || !exploitsAllowed"
+                      @click="confirmAndExploit(svc, 'check')"
+                      title="Run the module's check action - validates the target without firing the payload">
+                <i data-lucide="search-check" class="w-3 h-3"></i> Check
+              </button>
+              <button class="btn !py-1 !px-2 text-white bg-red-600/80 hover:bg-red-500 disabled:bg-ink-700 disabled:text-slate-500"
+                      :disabled="svc.recommended_exploit_module === 'manual review' || !exploitsAllowed"
+                      @click="confirmAndExploit(svc, 'run')"
+                      title="Fire the exploit module against the target">
+                <i data-lucide="zap" class="w-3 h-3"></i> Run Exploit
+              </button>
+            </div>
+
+            <div x-show="exploitOutput[svc.id]"
+                 class="border-t border-ink-700/60 px-3 py-2 bg-ink-950/40">
+              <pre class="text-xs text-slate-300 font-mono whitespace-pre-wrap"
+                   x-text="exploitOutput[svc.id]"></pre>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="!scopeCount()">
+          <div class="text-slate-600 text-xs italic text-center py-12">
+            Tick a service in Step 02 to add it to scope, then return here to attempt exploits.
           </div>
         </template>
       </div>
