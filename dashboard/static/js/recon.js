@@ -6,6 +6,7 @@ function reconPage() {
     running: false,
     latestScanId: null,
     latestScanStatus: '',
+    lastScanTarget: null,
     pollHandle: null,
     stats: { progress: 0 },
 
@@ -20,9 +21,19 @@ function reconPage() {
     cveModal: null,
     modalCves: [],
 
+    // Exploit state
+    exploitReady: false,
+    exploitMessage: "",
+    exploitLhost: null,
+    exploitLport: 4444,
+    exploitTarget: null,    // service object selected for the confirm modal
+
     init() {
       this.refresh();
+      this.refreshExploitStatus();
       this.pollHandle = setInterval(() => this.refresh(), 2500);
+      // Exploit-status changes rarely; poll less aggressively.
+      setInterval(() => this.refreshExploitStatus(), 15000);
     },
 
     destroy() {
@@ -121,6 +132,7 @@ function reconPage() {
         if (snap.scan) {
           this.latestScanId = snap.scan.id;
           this.latestScanStatus = snap.scan.status;
+          this.lastScanTarget = snap.scan.target;
           if (snap.scan.status === 'running' || snap.scan.status === 'queued') {
             this.running = true;
             this.stats.progress = Math.min(95, (this.stats.progress || 0) + 6);
@@ -200,6 +212,59 @@ function reconPage() {
     patchInfo(svc) {
       const top = (svc.top_cves || [])[0];
       if (top) window.open('https://nvd.nist.gov/vuln/detail/' + top.cve_id, '_blank');
+    },
+
+    // ---------- Exploit flow ----------
+    async refreshExploitStatus() {
+      try {
+        const data = await fetch('/api/exploit/status').then(r => r.json());
+        this.exploitReady = !!data.ready;
+        this.exploitMessage = data.message || "";
+        this.exploitLhost = data.lhost || null;
+        this.exploitLport = data.lport || 4444;
+      } catch (e) {
+        this.exploitReady = false;
+        this.exploitMessage = "Could not query exploit status";
+      }
+    },
+
+    confirmExploit(svc) {
+      if (!this.exploitReady) {
+        this.appendLog('warn', 'Exploit not armed: ' + this.exploitMessage);
+        return;
+      }
+      // Stash the current scan's target onto the service so the modal can show it
+      // (the table-level scan target is on the parent scope page; we already
+      // have svc.id which the backend resolves).
+      this.exploitTarget = {
+        ...svc,
+        target: this.lastScanTarget || '<target>',
+        module: svc.recommended_exploit || '(no module)',
+      };
+    },
+
+    async fireExploit() {
+      const svc = this.exploitTarget;
+      if (!svc) return;
+      this.exploitTarget = null;  // close modal immediately
+      this.actionOutput[svc.id] = '⟳ firing exploit ' + svc.module + ' ...';
+      this.appendLog('warn', `EXPLOIT fired: ${svc.module} -> ${svc.target}:${svc.port}`);
+      try {
+        const resp = await fetch(`/api/services/${svc.id}/action`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'exploit' }),
+        });
+        const data = await resp.json();
+        this.actionOutput[svc.id] = data.output || JSON.stringify(data, null, 2);
+        const sev = data.status === 'vulnerable' || data.status === 'completed'
+                    ? 'success'
+                    : (data.status === 'error' ? 'error' : 'warn');
+        this.appendLog(sev, `Exploit ${svc.module} -> ${data.status} (${data.duration_seconds || '?'}s)`);
+      } catch (e) {
+        this.actionOutput[svc.id] = 'Network error firing exploit: ' + e.message;
+        this.appendLog('error', 'Exploit fire failed: ' + e.message);
+      }
     },
 
     downloadReport() {

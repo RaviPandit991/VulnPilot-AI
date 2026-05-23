@@ -17,6 +17,10 @@ metasploit:
   password: msf
   ssl: false
   enabled: false        # require explicit opt-in
+  # Reverse-shell binding (only used when exploit mode is enabled and a
+  # module needs LHOST/LPORT). 'auto' picks the IP of the default route.
+  lhost: auto
+  lport: 4444
 
 ai:
   use_local_llm: false

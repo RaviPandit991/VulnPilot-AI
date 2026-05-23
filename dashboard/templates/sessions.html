@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Sessions{% endblock %}
+
+{% block content %}
+<div class="panel" x-data="{
+  enabled: false,
+  sessions: [],
+  err: null,
+  async refresh() {
+    try {
+      const data = await fetch('/api/sessions').then(r => r.json());
+      this.enabled = !!data.enabled;
+      this.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+      this.err = data.error || null;
+    } catch (e) {
+      this.err = 'Network error: ' + e.message;
+    }
+  }
+}" x-init="refresh(); setInterval(()=>refresh(), 5000)">
+
+  <div class="panel-header px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <i data-lucide="terminal" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">ACTIVE SESSIONS</h2>
+      <span class="text-xs text-slate-500" x-text="enabled ? sessions.length + ' open' : 'MSF disabled'"></span>
+    </div>
+    <button class="btn btn-ghost !py-1" @click="refresh()">
+      <i data-lucide="refresh-cw" class="w-3 h-3"></i> Refresh
+    </button>
+  </div>
+
+  <div class="p-4">
+    <template x-if="!enabled">
+      <div class="text-sm text-slate-400">
+        Metasploit RPC is disabled. Set <code class="font-mono text-cyan-300">metasploit.enabled: true</code>
+        in <code class="font-mono">configs/config.yaml</code> and start <code class="font-mono">msfrpcd</code>
+        to manage sessions.
+      </div>
+    </template>
+
+    <template x-if="enabled && err">
+      <div class="text-sm text-red-300 font-mono" x-text="err"></div>
+    </template>
+
+    <template x-if="enabled && !err && !sessions.length">
+      <div class="text-sm text-slate-500 italic">
+        No active sessions. Successful exploits create a session here. Use the
+        <a class="text-cyan-300 hover:text-cyan-200" href="{{ url_for('recon') }}">Recon</a>
+        page to fire exploits, or drive Metasploit directly with <code class="font-mono">msfconsole</code>.
+      </div>
+    </template>
+
+    <template x-if="enabled && sessions.length">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 border-b border-ink-700/60">
+          <tr>
+            <th class="text-left py-2 px-2 font-medium">ID</th>
+            <th class="text-left py-2 px-2 font-medium">Type</th>
+            <th class="text-left py-2 px-2 font-medium">Peer</th>
+            <th class="text-left py-2 px-2 font-medium">Host</th>
+            <th class="text-left py-2 px-2 font-medium">User</th>
+            <th class="text-left py-2 px-2 font-medium">Platform</th>
+            <th class="text-left py-2 px-2 font-medium">Via</th>
+            <th class="text-left py-2 px-2 font-medium">Info</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="sess in sessions" :key="sess.id">
+            <tr class="border-b border-ink-800/60 hover:bg-ink-800/30">
+              <td class="py-2 px-2 font-mono text-cyan-300" x-text="'#' + sess.id"></td>
+              <td class="py-2 px-2"><span class="sev sev-high" x-text="sess.type"></span></td>
+              <td class="py-2 px-2 font-mono text-slate-300" x-text="sess.tunnel_peer"></td>
+              <td class="py-2 px-2 font-mono text-slate-400" x-text="sess.session_host || '?'"></td>
+              <td class="py-2 px-2 text-slate-300" x-text="sess.username || '—'"></td>
+              <td class="py-2 px-2 text-slate-400" x-text="sess.platform || '—'"></td>
+              <td class="py-2 px-2 text-slate-500 font-mono truncate max-w-[200px]" :title="sess.via_exploit"
+                  x-text="(sess.via_exploit || '').replace(/^exploit\//,'')"></td>
+              <td class="py-2 px-2 text-slate-300 truncate max-w-[300px]" :title="sess.info"
+                  x-text="sess.info || '—'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </template>
+
+    <div class="mt-6 text-xs text-slate-600 leading-relaxed border-t border-ink-700/60 pt-4">
+      <strong class="text-slate-500">Read-only on purpose.</strong> VulnPilot lists sessions but
+      does not let you send commands from the browser - drop into <code class="font-mono text-cyan-300">msfconsole</code>
+      and run <code class="font-mono text-cyan-300">sessions -i &lt;id&gt;</code> for that. Background
+      and exit cleanly when you are done.
+    </div>
+  </div>
+</div>
+{% endblock %}
