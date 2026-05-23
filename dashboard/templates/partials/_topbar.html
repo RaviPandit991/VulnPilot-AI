@@ -1,0 +1,35 @@
+{# Top bar with workspace selector, status pill, notifications, user #}
+<header class="h-14 shrink-0 bg-ink-900/70 backdrop-blur border-b border-ink-700/60 flex items-center px-4 gap-4 z-10"
+        x-data="{ notifOpen:false, userOpen:false }">
+  <div class="flex items-center gap-2">
+    <span class="text-sm font-semibold tracking-wide text-cyan-300">VulnPilot AI</span>
+    <span class="text-slate-600">|</span>
+    <button class="flex items-center gap-2 rounded-md bg-ink-800/80 px-3 py-1.5 text-xs text-slate-300 border border-ink-700 hover:border-ink-600">
+      <i data-lucide="folder-tree" class="w-3.5 h-3.5"></i>
+      <span>Workspace</span>
+      <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+    </button>
+  </div>
+
+  <div class="flex-1"></div>
+
+  {# Engagement status pill - reflects whether VULNPILOT_AUTHORIZED is set #}
+  <div class="flex items-center gap-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 px-3 py-1 text-xs text-emerald-300">
+    <span class="relative flex h-2 w-2">
+      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+      <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-400"></span>
+    </span>
+    <span class="font-medium">Authorized</span>
+  </div>
+
+  <button class="text-slate-400 hover:text-slate-200 relative p-2 rounded-md hover:bg-ink-800/80"
+          @click="notifOpen=!notifOpen">
+    <i data-lucide="bell" class="w-4 h-4"></i>
+    <span class="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+  </button>
+
+  <button class="text-slate-400 hover:text-slate-200 p-2 rounded-md hover:bg-ink-800/80"
+          @click="userOpen=!userOpen">
+    <i data-lucide="user-circle" class="w-4 h-4"></i>
+  </button>
+</header>

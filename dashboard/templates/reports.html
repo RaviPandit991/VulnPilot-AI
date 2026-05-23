@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+
+{% block content %}
+<div class="panel" x-data="{
+  files: [],
+  async refresh() { this.files = await fetch('/api/reports').then(r=>r.json()).catch(()=>[]); }
+}" x-init="refresh(); setInterval(()=>refresh(), 5000)">
+  <div class="panel-header px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <i data-lucide="file-text" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">REPORTS</h2>
+    </div>
+    <span class="text-xs text-slate-500" x-text="files.length + ' files'"></span>
+  </div>
+
+  <table class="w-full text-xs">
+    <thead class="text-slate-500 border-b border-ink-700/60">
+      <tr>
+        <th class="text-left py-2 px-4 font-medium">Filename</th>
+        <th class="text-left py-2 font-medium">Format</th>
+        <th class="text-left py-2 font-medium">Size</th>
+        <th class="text-left py-2 px-4 font-medium">Modified</th>
+        <th class="text-right py-2 px-4 font-medium">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      <template x-for="f in files" :key="f.path">
+        <tr class="border-b border-ink-800/60 hover:bg-ink-800/40">
+          <td class="py-2 px-4 font-mono text-cyan-300 truncate max-w-[400px]" x-text="f.name"></td>
+          <td class="py-2"><span class="sev sev-info" x-text="f.format.toUpperCase()"></span></td>
+          <td class="py-2 text-slate-400 font-mono" x-text="f.size_human"></td>
+          <td class="py-2 px-4 text-slate-500 font-mono" x-text="f.modified.slice(0,19).replace('T',' ')"></td>
+          <td class="py-2 px-4 text-right">
+            <a class="btn btn-ghost !py-1" :href="'/api/reports/' + encodeURIComponent(f.name)" target="_blank">
+              <i data-lucide="download" class="w-3 h-3"></i> Download
+            </a>
+          </td>
+        </tr>
+      </template>
+      <template x-if="files.length === 0">
+        <tr><td colspan="5" class="py-12 text-center text-slate-600 italic">No reports yet. Run a scan to generate reports.</td></tr>
+      </template>
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Scans{% endblock %}
+
+{% block content %}
+<div class="panel" x-data="{
+  scans: [], q: '', selected: null, detail: null,
+  async refresh() {
+    this.scans = await fetch('/api/scans').then(r=>r.json()).catch(()=>[]);
+    if (this.selected) this.loadDetail(this.selected);
+  },
+  async loadDetail(id) {
+    this.selected = id;
+    this.detail = await fetch('/api/scans/'+id).then(r=>r.json()).catch(()=>null);
+  },
+  filtered() {
+    if (!this.q) return this.scans;
+    const q = this.q.toLowerCase();
+    return this.scans.filter(s => (s.target||'').toLowerCase().includes(q) || (s.operator||'').toLowerCase().includes(q));
+  }
+}" x-init="refresh(); setInterval(()=>refresh(), 5000)">
+
+  <div class="panel-header px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <i data-lucide="activity" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">SCAN HISTORY</h2>
+    </div>
+    <div class="flex items-center gap-2">
+      <input class="field !py-1 !text-xs w-64" placeholder="Filter by target or operator..." x-model="q" />
+      <a href="{{ url_for('recon') }}" class="btn btn-primary !py-1.5"><i data-lucide="plus" class="w-3 h-3"></i> New Scan</a>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 min-h-[600px]">
+    <div class="border-r border-ink-700/60 overflow-y-auto max-h-[80vh]">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 sticky top-0 bg-ink-900/95 backdrop-blur">
+          <tr class="border-b border-ink-700/60">
+            <th class="text-left py-2 px-4 font-medium">ID</th>
+            <th class="text-left py-2 font-medium">Target</th>
+            <th class="text-left py-2 font-medium">Operator</th>
+            <th class="text-left py-2 font-medium">Mode</th>
+            <th class="text-left py-2 font-medium">Status</th>
+            <th class="text-left py-2 px-4 font-medium">Started</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="s in filtered()" :key="s.id">
+            <tr class="border-b border-ink-800/60 cursor-pointer transition-colors"
+                :class="selected === s.id ? 'bg-cyan-500/10' : 'hover:bg-ink-800/40'"
+                @click="loadDetail(s.id)">
+              <td class="py-2 px-4 font-mono text-slate-400" x-text="'#' + s.id"></td>
+              <td class="py-2 font-mono text-cyan-300" x-text="s.target"></td>
+              <td class="py-2 text-slate-400" x-text="s.operator || '—'"></td>
+              <td class="py-2"><span class="sev" :class="'sev-' + (s.mode==='safe'?'low':'medium')" x-text="s.mode"></span></td>
+              <td class="py-2 text-xs" :class="{
+                'text-emerald-300': s.status==='complete',
+                'text-amber-300':   s.status==='running' || s.status==='queued',
+                'text-orange-300':  s.status==='partial',
+                'text-red-300':     s.status==='error'
+              }" x-text="s.status"></td>
+              <td class="py-2 px-4 text-slate-500 font-mono" x-text="(s.started_at || '').slice(0,19).replace('T',' ')"></td>
+            </tr>
+          </template>
+          <template x-if="scans.length === 0">
+            <tr><td colspan="6" class="py-12 text-center text-slate-600 italic">No scans yet</td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="overflow-y-auto max-h-[80vh] p-4" x-show="detail">
+      <template x-if="detail">
+        <div>
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold">Scan #<span x-text="detail.id"></span> &middot; <span class="text-cyan-300 font-mono" x-text="detail.target"></span></h3>
+            <a class="btn btn-ghost !py-1" :href="'/api/scans/' + detail.id + '/report.json'" target="_blank">
+              <i data-lucide="download" class="w-3 h-3"></i> JSON
+            </a>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-xs mb-4">
+            <div><span class="text-slate-500">Operator:</span> <span x-text="detail.operator"></span></div>
+            <div><span class="text-slate-500">Status:</span> <span x-text="detail.status"></span></div>
+            <div><span class="text-slate-500">Started:</span> <span class="font-mono" x-text="(detail.started_at||'').slice(0,19).replace('T',' ')"></span></div>
+            <div><span class="text-slate-500">Finished:</span> <span class="font-mono" x-text="(detail.finished_at||'').slice(0,19).replace('T',' ')"></span></div>
+          </div>
+          <div x-show="detail.notes" class="text-xs p-2 bg-red-500/10 border border-red-500/30 rounded mb-3 font-mono text-red-200" x-text="detail.notes"></div>
+
+          <h4 class="text-[0.65rem] font-bold tracking-[0.15em] text-cyan-400/80 mb-2">SERVICES (<span x-text="detail.services?.length || 0"></span>)</h4>
+          <div class="space-y-1 mb-4">
+            <template x-for="svc in (detail.services || [])" :key="svc.id">
+              <div class="flex items-center gap-3 text-xs bg-ink-900/40 border border-ink-700/40 rounded px-2 py-1.5 font-mono">
+                <span class="text-cyan-300 w-16" x-text="svc.port + '/' + svc.protocol"></span>
+                <span class="text-slate-300 w-20" x-text="svc.name || '?'"></span>
+                <span class="text-slate-400 truncate" x-text="(svc.product || '') + ' ' + (svc.version || '')"></span>
+              </div>
+            </template>
+          </div>
+
+          <h4 class="text-[0.65rem] font-bold tracking-[0.15em] text-cyan-400/80 mb-2">VULNERABILITIES (<span x-text="detail.vulnerabilities?.length || 0"></span>)</h4>
+          <div class="space-y-1">
+            <template x-for="v in (detail.vulnerabilities || [])" :key="v.cve_id + ':' + (v.id || '')">
+              <div class="flex items-center gap-3 text-xs bg-ink-900/40 border border-ink-700/40 rounded px-2 py-1.5">
+                <span class="font-mono text-amber-300 w-32" x-text="v.cve_id"></span>
+                <span class="font-mono text-slate-400 w-12" x-text="v.cvss !== null ? v.cvss.toFixed(1) : '—'"></span>
+                <span class="sev" :class="'sev-' + (v.severity || 'info').toLowerCase()" x-text="v.severity || 'INFO'"></span>
+                <span class="truncate text-slate-300" x-text="v.summary"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+      <template x-if="!detail">
+        <div class="text-slate-600 text-xs italic text-center py-12">Select a scan to see detail</div>
+      </template>
+    </div>
+  </div>
+</div>
+{% endblock %}
