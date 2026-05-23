@@ -384,6 +384,7 @@ def create_app() -> Flask:
                         for c in top
                     ],
                     "recommended_module": _recommended_module(svc),
+                    "recommended_exploit_module": _recommended_exploit_module(svc),
                     "suggested_command": _suggest_command(svc, scan.target),
                 })
             services.sort(key=lambda x: x["port"])
@@ -396,6 +397,7 @@ def create_app() -> Flask:
                     "notes": scan.notes,
                 },
                 "services": services,
+                "exploits_allowed": _can_run_exploits(),
             })
 
     @app.get("/api/msf/status")
@@ -490,6 +492,90 @@ def create_app() -> Flask:
                 return _do_msf_check(s, svc, target)
 
             return jsonify({"error": f"unknown action: {action}"}), 400
+
+    @app.post("/api/services/<int:service_id>/exploit")
+    def run_service_exploit(service_id: int):
+        """Run a known Metasploit *exploit* module against an in-scope service.
+
+        Body:
+          {"action": "check" | "run", "confirm": true}
+
+        Strict gating - all of these must hold or the request is rejected:
+          - VULNPILOT_ALLOW_EXPLOIT=1 in the dashboard process env
+          - metasploit.enabled = true in configs/config.yaml
+          - msfrpcd reachable
+          - request body has confirm: true
+          - service is currently in_scope
+          - _recommended_exploit_module() returned a real path
+            (i.e. not 'manual review')
+
+        An ExploitRun row is persisted with safe_mode=False before the
+        module fires, so the audit trail captures the attempt even if
+        the call hangs or the dashboard crashes mid-run.
+        """
+        payload = request.get_json(silent=True) or {}
+        action = (payload.get("action") or "").lower()
+        confirm = bool(payload.get("confirm"))
+
+        if action not in ("check", "run"):
+            return jsonify({
+                "status": "error",
+                "output": "action must be 'check' or 'run'",
+            }), 400
+        if not confirm:
+            return jsonify({
+                "status": "blocked",
+                "output": "Confirmation required: set confirm=true in the request body.",
+            }), 400
+        if not _can_run_exploits():
+            return jsonify({
+                "status": "blocked",
+                "output": (
+                    "Exploit mode is disabled.\n\n"
+                    "1. Stop the dashboard.\n"
+                    "2. In the same shell, run:\n"
+                    "     export VULNPILOT_ALLOW_EXPLOIT=1\n"
+                    "3. Restart with: python main.py dashboard\n\n"
+                    "This guard is intentional - exploit modules are\n"
+                    "destructive and may crash, alter, or backdoor the target."
+                ),
+            }), 403
+
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return jsonify({
+                "status": "blocked",
+                "output": (
+                    "Metasploit RPC is disabled in configs/config.yaml.\n"
+                    "Set metasploit.enabled: true and ensure msfrpcd is running."
+                ),
+            }), 400
+
+        with session_scope() as s:
+            svc = s.get(Service, service_id)
+            if not svc:
+                return jsonify({"error": "service not found"}), 404
+            if not svc.in_scope:
+                return jsonify({
+                    "status": "blocked",
+                    "output": "Service is not in scope - tick it in Step 02 first.",
+                }), 400
+            target = svc.scan.target
+
+            module_path = _recommended_exploit_module(svc)
+            if module_path == "manual review":
+                return jsonify({
+                    "status": "skipped",
+                    "output": (
+                        f"No high-confidence exploit module is registered for\n"
+                        f"  {svc.name} {svc.product or ''} {svc.version or ''}.\n\n"
+                        f"Use the Scope & Actions tab to gather more information\n"
+                        f"(banner, NSE scripts, safe MSF check) before attempting\n"
+                        f"manual exploitation in msfconsole."
+                    ),
+                }), 200
+
+            return _do_msf_exploit(s, svc, target, module_path, action)
 
     # ----------------- Error handlers -----------------
     @app.errorhandler(500)
@@ -637,6 +723,68 @@ def _recommended_module(svc) -> str:
         # elasticsearch, etc.
     }
     return table.get(name, "manual review")
+
+
+def _recommended_exploit_module(svc) -> str:
+    """Map a service to a known Metasploit *exploit* module path.
+
+    Only used by the Exploit tab. Modules returned here BYPASS the
+    SAFE_PREFIXES allowlist when invoked, so the caller MUST first
+    verify VULNPILOT_ALLOW_EXPLOIT=1 and require explicit per-call
+    confirmation. Returns 'manual review' when no high-confidence
+    exploit is registered.
+
+    The mapping is intentionally conservative - it targets services
+    where the product/version banner makes the exploit choice obvious
+    (Metasploitable's vsftpd 2.3.4 backdoor, UnrealIRCd 3.2.8.1, the
+    Samba usermap_script bug, distccd, and EternalBlue on Windows
+    SMBv1). Anything else returns 'manual review' so the operator
+    can use the Scope & Actions tab to gather more info first.
+    """
+    if not svc or not svc.name:
+        return "manual review"
+    name = svc.name.lower()
+    product = (svc.product or "").lower()
+    version = (svc.version or "").lower()
+
+    # vsftpd 2.3.4 backdoor (Metasploitable 2)
+    if name == "ftp" and "vsftpd" in product and version.startswith("2.3.4"):
+        return "exploit/unix/ftp/vsftpd_234_backdoor"
+
+    # UnrealIRCd 3.2.8.1 backdoor (Metasploitable 2)
+    if name in ("ircd", "irc") or "unrealircd" in product:
+        return "exploit/unix/irc/unreal_ircd_3281_backdoor"
+
+    # distcc remote command exec (CVE-2004-2687)
+    if name == "distccd":
+        return "exploit/unix/misc/distcc_exec"
+
+    # Samba 3.x usermap_script (CVE-2007-2447)
+    if name in ("netbios-ssn", "microsoft-ds", "smb") and "samba" in product:
+        if version.startswith(("3.0.", "3.2.", "3.3.", "3.4.", "3.5.")):
+            return "exploit/multi/samba/usermap_script"
+
+    # Java RMI registry default config (Metasploitable 2)
+    if name in ("java-rmi", "rmiregistry"):
+        return "exploit/multi/misc/java_rmi_server"
+
+    # Windows SMBv1 - EternalBlue (MS17-010)
+    if name == "microsoft-ds" and ("windows" in product or not product):
+        return "exploit/windows/smb/ms17_010_eternalblue"
+
+    # Tomcat manager default creds upload (only when product hints Tomcat)
+    if name in ("http", "https", "http-alt", "http-proxy") and "tomcat" in product:
+        return "exploit/multi/http/tomcat_mgr_upload"
+
+    return "manual review"
+
+
+def _can_run_exploits() -> bool:
+    """True iff the operator opted in to exploit mode for this dashboard
+    process. Set ``VULNPILOT_ALLOW_EXPLOIT=1`` in the shell that launches
+    the dashboard; the value is read at every request so a misconfigured
+    server can be locked down without a restart by unsetting the var."""
+    return os.environ.get("VULNPILOT_ALLOW_EXPLOIT") == "1"
 
 
 def _severity_label(cvss: float | None) -> str:
@@ -1020,6 +1168,108 @@ def _do_msf_check(s, svc, target: str):
 
     return jsonify({
         "action": "check",
+        "status": result.status,
+        "module": module_path,
+        "duration_seconds": round(result.duration_seconds, 1),
+        "run_id": run_id,
+        "output": (result.output or "(no output captured)")[-3000:],
+    })
+
+
+def _do_msf_exploit(s, svc, target: str, module_path: str, action: str):
+    """Run a Metasploit *exploit* module via RPC and persist the run.
+
+    Mirrors `_do_msf_check` but BYPASSES the SAFE_PREFIXES allowlist
+    (via ``allow_unsafe=True`` on the client) and stores the row with
+    ``safe_mode=False``. Caller must have already verified
+    VULNPILOT_ALLOW_EXPLOIT=1, metasploit.enabled=true, and explicit
+    confirm=true on the request - this helper does no further gating.
+
+    Blocks the request for up to ~135 seconds (120s for the module +
+    headroom). For ``action="check"`` most exploits return in 5-30s;
+    for ``action="run"`` the timeout protects against modules that
+    hang waiting for a session payload that never arrives because we
+    don't configure one (intentional - we never stage payloads).
+    """
+    from exploit_engine.module_selector import SelectedModule
+    from exploit_engine.metasploit_client import (
+        MetasploitClient, MetasploitDisabled,
+    )
+
+    msf_cfg = get_settings().section("metasploit")
+
+    selection = SelectedModule(
+        module=module_path,
+        action=action,
+        options={"RHOSTS": target, "RPORT": svc.port},
+        target_host=target,
+        target_port=svc.port,
+        rationale="Operator-initiated exploit via dashboard",
+        severity_hint="critical",
+    )
+
+    client = MetasploitClient(
+        host=msf_cfg.get("host", "127.0.0.1"),
+        port=int(msf_cfg.get("port", 55553)),
+        username=msf_cfg.get("username", "msf"),
+        password=msf_cfg.get("password", "msf"),
+        ssl=bool(msf_cfg.get("ssl", False)),
+        enabled=True,
+    )
+
+    # Persist the attempt up-front so the audit trail survives a hang/crash.
+    run = ExploitRun(
+        scan_id=svc.scan_id,
+        module=module_path,
+        action=action,
+        options=str(selection.options),
+        status="running",
+        safe_mode=False,
+        result="(in progress)",
+    )
+    s.add(run)
+    s.flush()
+    run_id = run.id
+
+    log.warning(
+        "EXPLOIT %s action=%s -> %s:%s starting (run #%s, operator-initiated)",
+        module_path, action, target, svc.port, run_id,
+    )
+
+    try:
+        result = client.run(selection, timeout=120.0, allow_unsafe=True)
+    except MetasploitDisabled as exc:
+        run.status = "skipped"
+        run.result = f"MSF disabled: {exc}"
+        return jsonify({
+            "action": action, "status": "skipped",
+            "module": module_path, "run_id": run_id,
+            "output": str(exc),
+        }), 200
+    except Exception as exc:
+        log.exception("Exploit run failed")
+        run.status = "error"
+        run.result = f"{type(exc).__name__}: {exc}"
+        return jsonify({
+            "action": action, "status": "error",
+            "module": module_path, "run_id": run_id,
+            "output": (
+                f"Exploit call failed: {exc}\n\n"
+                "Check that msfrpcd is running and that the password in\n"
+                "configs/config.yaml matches what you passed to msfrpcd -P."
+            ),
+        }), 500
+
+    run.status = result.status
+    run.result = result.output[-4000:] if result.output else ""
+
+    log.warning(
+        "EXPLOIT %s finished status=%s in %.1fs (run #%s)",
+        module_path, result.status, result.duration_seconds, run_id,
+    )
+
+    return jsonify({
+        "action": action,
         "status": result.status,
         "module": module_path,
         "duration_seconds": round(result.duration_seconds, 1),

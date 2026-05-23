@@ -16,6 +16,12 @@ function reconPage() {
     filterText: '',
     logs: [],
 
+    // Step 03 tab state
+    activeTab: 'scope',    // 'scope' | 'exploit'
+    exploitOutput: {},     // {service_id: text} - separate buffer so the
+                           // Scope tab's actionOutput doesn't get clobbered
+    exploitsAllowed: false,// mirrors VULNPILOT_ALLOW_EXPLOIT on the server
+
     // Modal
     cveModal: null,
     modalCves: [],
@@ -118,6 +124,13 @@ function reconPage() {
           in_scope: localScope.has(s.id) ? localScope.get(s.id) : s.in_scope,
         }));
 
+        // Refresh exploit-mode flag every poll so unsetting the env var
+        // and restarting the dashboard locks down the UI without a
+        // manual page reload.
+        if (typeof snap.exploits_allowed === 'boolean') {
+          this.exploitsAllowed = snap.exploits_allowed;
+        }
+
         if (snap.scan) {
           this.latestScanId = snap.scan.id;
           this.latestScanStatus = snap.scan.status;
@@ -183,6 +196,62 @@ function reconPage() {
     async runAllChecks() {
       for (const s of this.scopedServices()) {
         await this.action(s, 'check');
+      }
+    },
+
+    // -------- Exploit tab --------
+    // Pop a confirm() before firing anything destructive. We deliberately
+    // use the browser-native dialog instead of a custom modal so it can't
+    // be auto-dismissed by stray clicks - the operator must read the
+    // module name and click OK.
+    confirmAndExploit(svc, action) {
+      if (!this.exploitsAllowed) {
+        this.exploitOutput[svc.id] =
+          'Blocked: VULNPILOT_ALLOW_EXPLOIT=1 must be set before launching the dashboard.';
+        return;
+      }
+      if (!svc.recommended_exploit_module ||
+          svc.recommended_exploit_module === 'manual review') {
+        this.exploitOutput[svc.id] = 'No exploit module registered for this service.';
+        return;
+      }
+      const verb = action === 'run' ? 'RUN EXPLOIT' : 'check';
+      const msg =
+        `${verb} against ${svc.port}/${svc.name} on the live target?\n\n` +
+        `Module: ${svc.recommended_exploit_module}\n\n` +
+        (action === 'run'
+           ? 'This is a destructive action. The target may crash, reboot, or be left in an exploited state. Continue?'
+           : 'This runs the module\'s check action only. No payload is fired. Continue?');
+      if (!window.confirm(msg)) return;
+      this.runExploit(svc, action);
+    },
+
+    async runExploit(svc, action) {
+      this.exploitOutput[svc.id] = '⟳ exploit ' + action + '...';
+      try {
+        const resp = await fetch(`/api/services/${svc.id}/exploit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, confirm: true }),
+        });
+        const data = await resp.json();
+        this.exploitOutput[svc.id] =
+          (data.module ? `module: ${data.module}\n` : '') +
+          (data.duration_seconds !== undefined ? `duration: ${data.duration_seconds}s\n` : '') +
+          (data.run_id !== undefined ? `run #${data.run_id}\n` : '') +
+          `status: ${data.status || 'unknown'}\n\n` +
+          (data.output || JSON.stringify(data, null, 2));
+        // Map MSF status -> log severity so the live log strip is readable.
+        const sev = data.status === 'vulnerable' || data.status === 'completed'
+          ? 'success'
+          : (data.status === 'error' ? 'error'
+            : (data.status === 'blocked' || data.status === 'skipped' ? 'warn'
+              : 'info'));
+        this.appendLog(sev,
+          `[${svc.port}/${svc.name}] EXPLOIT ${action} → ${data.status || 'done'}`);
+      } catch (e) {
+        this.exploitOutput[svc.id] = 'Network error: ' + e.message;
+        this.appendLog('error', `Exploit ${action} failed: ${e.message}`);
       }
     },
 
