@@ -205,6 +205,7 @@ def create_app() -> Flask:
         operator = payload.get("operator", "web-user")
         mode = payload.get("mode", "safe")
         auth_ref = payload.get("authorization_ref")
+        scan_profile = (payload.get("scan_profile") or "standard").lower()
         if not target:
             return jsonify({"error": "target required"}), 400
 
@@ -219,7 +220,7 @@ def create_app() -> Flask:
         scan_id = _create_scan_row(target, operator, mode, auth_ref)
         threading.Thread(
             target=_run_scan_background,
-            args=(scan_id, target, operator, mode),
+            args=(scan_id, target, operator, mode, scan_profile),
             daemon=True,
         ).start()
         return jsonify({"id": scan_id, "status": "queued"}), 202
@@ -341,6 +342,162 @@ def create_app() -> Flask:
             abort(404)
         return send_file(target, as_attachment=True)
 
+    # ----------------- REST: services + scope + actions -----------------
+    @app.get("/api/scans/latest/services")
+    def latest_scan_services():
+        """Return services from the most recent scan, with CVE rollups
+        and in_scope flag. This drives the DISCOVERED + SCOPE panels."""
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if not scan:
+                return jsonify({"scan": None, "services": []})
+
+            # Build CVE index per service
+            cves_by_svc: Dict[int, list] = {}
+            for v in scan.vulnerabilities:
+                cves_by_svc.setdefault(v.service_id or 0, []).append(v)
+
+            services = []
+            for svc in scan.services:
+                svc_cves = cves_by_svc.get(svc.id, [])
+                max_cvss = max((c.cvss or 0.0 for c in svc_cves), default=0.0)
+                top = sorted(svc_cves, key=lambda x: x.cvss or 0.0, reverse=True)[:3]
+                services.append({
+                    "id": svc.id,
+                    "port": svc.port,
+                    "protocol": svc.protocol,
+                    "name": svc.name or "?",
+                    "product": svc.product,
+                    "version": svc.version,
+                    "banner": svc.banner,
+                    "in_scope": bool(svc.in_scope),
+                    "notes": svc.notes,
+                    "cve_count": len(svc_cves),
+                    "max_cvss": max_cvss,
+                    "max_severity": (_severity_label(max_cvss) or "info").lower(),
+                    "top_cves": [
+                        {"cve_id": c.cve_id, "cvss": c.cvss,
+                         "severity": (c.severity or "info").lower(),
+                         "summary": (c.summary or "")[:200]}
+                        for c in top
+                    ],
+                    "recommended_module": _recommended_module(svc),
+                    "suggested_command": _suggest_command(svc, scan.target),
+                })
+            services.sort(key=lambda x: x["port"])
+            return jsonify({
+                "scan": {
+                    "id": scan.id, "target": scan.target,
+                    "status": scan.status, "mode": scan.mode,
+                    "started_at": scan.started_at.isoformat() if scan.started_at else None,
+                    "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
+                    "notes": scan.notes,
+                },
+                "services": services,
+            })
+
+    @app.post("/api/services/<int:service_id>/scope")
+    def toggle_service_scope(service_id: int):
+        payload = request.get_json(silent=True) or {}
+        in_scope = bool(payload.get("in_scope", True))
+        with session_scope() as s:
+            svc = s.get(Service, service_id)
+            if not svc:
+                return jsonify({"error": "service not found"}), 404
+            svc.in_scope = in_scope
+            return jsonify({"id": service_id, "in_scope": in_scope})
+
+    @app.get("/api/services/<int:service_id>/cves")
+    def list_service_cves(service_id: int):
+        with session_scope() as s:
+            svc = s.get(Service, service_id)
+            if not svc:
+                return jsonify({"error": "service not found"}), 404
+            cves = sorted(
+                [v for v in svc.scan.vulnerabilities if v.service_id == service_id],
+                key=lambda x: x.cvss or 0.0, reverse=True,
+            )
+            return jsonify([
+                {"cve_id": v.cve_id, "cvss": v.cvss,
+                 "severity": (v.severity or "info").lower(),
+                 "summary": v.summary}
+                for v in cves
+            ])
+
+    @app.post("/api/services/<int:service_id>/action")
+    def run_service_action(service_id: int):
+        """Execute a per-service action.
+
+        Supported actions:
+          banner   - return captured Nmap banner text
+          command  - return a recommended msfconsole/nmap command string
+          check    - run the recommended Metasploit auxiliary check
+          note     - persist a free-text operator note (body: {note: str})
+        """
+        payload = request.get_json(silent=True) or {}
+        action = (payload.get("action") or "").lower()
+        with session_scope() as s:
+            svc = s.get(Service, service_id)
+            if not svc:
+                return jsonify({"error": "service not found"}), 404
+            target = svc.scan.target
+
+            if action == "banner":
+                output = svc.banner or "(no banner captured by Nmap; try a deeper scan)"
+                return jsonify({"action": "banner", "output": output})
+
+            if action == "command":
+                return jsonify({
+                    "action": "command",
+                    "output": _suggest_command(svc, target),
+                })
+
+            if action == "note":
+                svc.notes = (payload.get("note") or "")[:2000] or None
+                return jsonify({"action": "note", "note": svc.notes})
+
+            if action == "check":
+                msf_cfg = get_settings().section("metasploit")
+                if not msf_cfg.get("enabled"):
+                    return jsonify({
+                        "action": "check",
+                        "status": "skipped",
+                        "output": ("Metasploit RPC is disabled. Set "
+                                   "metasploit.enabled=true in configs/config.yaml "
+                                   "and start msfrpcd to run live checks."),
+                    }), 200
+                module = _recommended_module(svc)
+                if module == "manual review":
+                    return jsonify({
+                        "action": "check",
+                        "status": "skipped",
+                        "output": "No safe auxiliary module is registered for "
+                                  f"service '{svc.name}'. Manual review required.",
+                    })
+                # Persist the run record (will be re-used by exploit_engine
+                # in a future commit; for now we just stub the result).
+                run = ExploitRun(
+                    scan_id=svc.scan_id,
+                    module=module, action="check",
+                    options=str({"RHOSTS": target, "RPORT": svc.port}),
+                    status="queued",
+                    safe_mode=True,
+                    result="(execution not yet wired - record created)",
+                )
+                s.add(run)
+                return jsonify({
+                    "action": "check",
+                    "status": "queued",
+                    "module": module,
+                    "output": (f"Queued safe check: {module} against "
+                               f"{target}:{svc.port}. Live execution requires "
+                               f"msfrpcd running and metasploit.enabled=true."),
+                })
+
+            return jsonify({"error": f"unknown action: {action}"}), 400
+
     # ----------------- Error handlers -----------------
     @app.errorhandler(500)
     def _internal_error(exc):
@@ -438,6 +595,67 @@ def _recommended_module(svc) -> str:
     return table.get(name, "manual review")
 
 
+def _severity_label(cvss: float | None) -> str:
+    if cvss is None:
+        return "INFO"
+    if cvss >= 9.0:
+        return "CRITICAL"
+    if cvss >= 7.0:
+        return "HIGH"
+    if cvss >= 4.0:
+        return "MEDIUM"
+    if cvss > 0:
+        return "LOW"
+    return "INFO"
+
+
+def _suggest_command(svc, target: str) -> str:
+    """Return a copy-pasteable command for the service."""
+    name = (svc.name or "").lower()
+    port = svc.port
+    if name == "ssh":
+        return (
+            f"# Banner + algos + cipher audit\n"
+            f"nmap -sV -p {port} --script ssh2-enum-algos,ssh-auth-methods {target}"
+        )
+    if name in ("http", "https"):
+        scheme = "https" if name == "https" else "http"
+        return (
+            f"# HTTP fingerprint + common files\n"
+            f"nmap -sV -p {port} --script http-enum,http-headers,http-methods,"
+            f"http-title {target}\n"
+            f"curl -sI {scheme}://{target}:{port}/"
+        )
+    if name in ("smb", "microsoft-ds", "netbios-ssn"):
+        return (
+            f"# SMB version + EternalBlue check (non-exploit)\n"
+            f"nmap -sV -p {port} --script smb-protocols,smb2-security-mode,"
+            f"smb-vuln-ms17-010 {target}"
+        )
+    if name == "ftp":
+        return (
+            f"# FTP version + anon login\n"
+            f"nmap -sV -p {port} --script ftp-anon,ftp-syst {target}"
+        )
+    if name == "mysql":
+        return (
+            f"# MySQL version + empty password check\n"
+            f"nmap -sV -p {port} --script mysql-info,mysql-empty-password {target}"
+        )
+    if name == "postgresql":
+        return (
+            f"nmap -sV -p {port} --script pgsql-brute {target}    # safe = NO\n"
+            f"nmap -sV -p {port} {target}"
+        )
+    if name == "ms-wbt-server":
+        return (
+            f"# RDP - BlueKeep non-exploit check\n"
+            f"nmap -sV -p {port} --script rdp-vuln-ms12-020,rdp-enum-encryption "
+            f"{target}"
+        )
+    return f"nmap -sV -sC -p {port} {target}"
+
+
 def _ai_recommendation(scan: Scan, findings: list[dict]) -> str:
     if not findings:
         return ("Scan complete with no high-confidence CVE matches. Verify "
@@ -471,10 +689,20 @@ def _create_scan_row(target: str, operator: str, mode: str, auth_ref: str | None
         return scan.id
 
 
-def _run_scan_background(scan_id: int, target: str, operator: str, mode: str) -> None:
+def _run_scan_background(scan_id: int, target: str, operator: str, mode: str,
+                          scan_profile: str = "standard") -> None:
     from main import run_pipeline
+    profile_args = {
+        "quick":    "-sV -T4 --top-ports 100",
+        "standard": "-sV -sC -T4 --top-ports 1000",
+        "deep":     "-sV -sC -T4 -p-",
+    }
+    nmap_args = profile_args.get(scan_profile)
     try:
-        run_pipeline(target=target, operator=operator, mode=mode, scan_id=scan_id)
+        run_pipeline(
+            target=target, operator=operator, mode=mode, scan_id=scan_id,
+            nmap_args=nmap_args,
+        )
     except Exception:
         log.exception("Background scan %s failed", scan_id)
         with session_scope() as s:

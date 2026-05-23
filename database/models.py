@@ -58,6 +58,9 @@ class Service(Base):
     version: Mapped[Optional[str]] = mapped_column(String(64))
     banner: Mapped[Optional[str]] = mapped_column(Text)
     state: Mapped[str] = mapped_column(String(16), default="open")
+    # Operator-driven flags
+    in_scope: Mapped[bool] = mapped_column(default=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
 
     scan: Mapped[Scan] = relationship(back_populates="services")
 
