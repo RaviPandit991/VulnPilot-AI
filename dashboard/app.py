@@ -149,12 +149,9 @@ def create_app() -> Flask:
 
     @app.get("/exploits")
     def exploits():
-        return render_template(
-            "_simple_page.html", active="exploits",
-            page_title="Exploits", icon="zap",
-            description=("Curated, allowlist-only Metasploit auxiliary modules. "
-                         "Available once you enable Metasploit in config."),
-        )
+        # Real Exploit tab. The page hydrates client-side via the
+        # /api/exploit/* endpoints below.
+        return render_template("exploits.html", active="exploits")
 
     @app.get("/sessions")
     def sessions():
@@ -490,6 +487,277 @@ def create_app() -> Flask:
                 return _do_msf_check(s, svc, target)
 
             return jsonify({"error": f"unknown action: {action}"}), 400
+
+    # ----------------- REST: exploit tab -----------------
+    # The Exploit tab is intentionally separate from the safe `check`
+    # action above. It loads `exploit/*` modules from a curated catalog
+    # (see exploit_engine/exploit_runner.py) and persists every attempt
+    # as an ExploitRun row regardless of outcome.
+
+    @app.get("/api/exploit/catalog")
+    def api_exploit_catalog():
+        """Return the curated exploit catalog.
+
+        Optional query string ?scan_id=N decorates each entry with the
+        list of services from that scan it could target, so the UI can
+        offer 'one-click' presets next to each open port.
+        """
+        from exploit_engine.exploit_runner import (
+            list_catalog, suggest_for_service,
+        )
+        scan_id_arg = request.args.get("scan_id")
+        catalog = list_catalog()
+
+        scan_services: list[dict] = []
+        with session_scope() as s:
+            scan = None
+            if scan_id_arg:
+                try:
+                    scan = s.get(Scan, int(scan_id_arg))
+                except (TypeError, ValueError):
+                    scan = None
+            if scan is None:
+                scan = s.execute(
+                    select(Scan).order_by(desc(Scan.id)).limit(1)
+                ).scalar_one_or_none()
+            if scan is not None:
+                for svc in scan.services:
+                    scan_services.append({
+                        "id": svc.id, "port": svc.port,
+                        "protocol": svc.protocol,
+                        "name": svc.name or "",
+                        "product": svc.product or "",
+                        "version": svc.version or "",
+                        "rhost": scan.target,
+                    })
+                scan_summary = {
+                    "id": scan.id, "target": scan.target,
+                    "status": scan.status,
+                }
+            else:
+                scan_summary = None
+
+        # Annotate each catalog entry with the matching services.
+        for entry in catalog:
+            entry["matched_services"] = [
+                svc for svc in scan_services
+                if (svc["name"].lower() in entry["service_names"])
+                or (svc["port"] in entry["ports"])
+            ]
+
+        # Per-service suggestions (UI surfaces these on each row).
+        suggestions = []
+        for svc in scan_services:
+            for entry in suggest_for_service(svc["name"], svc["port"]):
+                suggestions.append({
+                    "service": svc,
+                    "module": entry["module"],
+                    "name": entry["name"],
+                    "risk": entry["risk"],
+                })
+
+        msf_cfg = get_settings().section("metasploit")
+        return jsonify({
+            "catalog": catalog,
+            "scan": scan_summary,
+            "services": scan_services,
+            "suggestions": suggestions,
+            "msf_enabled": bool(msf_cfg.get("enabled")),
+            "app_mode": get_settings().get("app.mode", "safe"),
+        })
+
+    @app.get("/api/exploit/runs")
+    def api_exploit_runs():
+        """Recent ExploitRun history across all scans, newest first."""
+        try:
+            limit = max(1, min(int(request.args.get("limit", 50)), 200))
+        except ValueError:
+            limit = 50
+        with session_scope() as s:
+            rows = s.execute(
+                select(ExploitRun).order_by(desc(ExploitRun.id)).limit(limit)
+            ).scalars().all()
+            out = []
+            for r in rows:
+                out.append({
+                    "id": r.id,
+                    "scan_id": r.scan_id,
+                    "module": r.module,
+                    "action": r.action,
+                    "status": r.status,
+                    "safe_mode": r.safe_mode,
+                    "options": r.options,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "result_excerpt": (r.result or "")[-280:],
+                })
+            return jsonify(out)
+
+    @app.get("/api/exploit/runs/<int:run_id>")
+    def api_exploit_run_detail(run_id: int):
+        with session_scope() as s:
+            r = s.get(ExploitRun, run_id)
+            if not r:
+                return jsonify({"error": "not found"}), 404
+            return jsonify({
+                "id": r.id,
+                "scan_id": r.scan_id,
+                "module": r.module,
+                "action": r.action,
+                "status": r.status,
+                "safe_mode": r.safe_mode,
+                "options": r.options,
+                "result": r.result or "",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            })
+
+    @app.post("/api/exploit/run")
+    def api_exploit_run():
+        """Launch a curated `exploit/*` module against a target.
+
+        Required JSON body fields:
+            module             - msf module path (must be in the catalog)
+            rhosts             - target host
+            rport              - target port (int)
+            confirm_authorized - must be true; the UI exposes this as a
+                                 checkbox the operator has to tick
+
+        Optional fields:
+            scan_id, operator, lhost, lport, payload, options (dict),
+            force_exploit (bool), auto_check (bool), authorization_ref
+        """
+        from exploit_engine.exploit_runner import (
+            ExploitRequest, find_by_module, is_allowed, run_exploit,
+        )
+
+        payload: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+        module = (payload.get("module") or "").strip()
+        rhosts = (payload.get("rhosts") or "").strip()
+        try:
+            rport = int(payload.get("rport") or 0)
+        except (TypeError, ValueError):
+            rport = 0
+        operator = payload.get("operator") or "web-user"
+        confirm = bool(payload.get("confirm_authorized"))
+
+        if not module or not rhosts or rport <= 0:
+            return jsonify({"error": "module, rhosts, rport are required"}), 400
+        if not is_allowed(module):
+            return jsonify({"error": f"module not in curated catalog: {module}"}), 403
+        if not confirm:
+            return jsonify({
+                "error": ("Refusing to run exploit without explicit "
+                          "authorization. Tick the 'I have written "
+                          "authorization to attack this host' box."),
+            }), 403
+
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return jsonify({
+                "status": "skipped",
+                "error": "Metasploit RPC is disabled in configs/config.yaml.",
+            }), 200
+
+        # Reuse the standard pre-engagement authorization check so the
+        # exploit tab honours the same operator-acknowledgement contract
+        # as the scan endpoint.
+        try:
+            require_authorization(
+                rhosts, operator=operator, mode="exploit",
+                non_interactive=True,
+                written_auth_ref=payload.get("authorization_ref") or "ui-exploit",
+            )
+        except AuthorizationError as exc:
+            return jsonify({"error": str(exc)}), 403
+
+        # Resolve scan_id - prefer explicit, else latest, else create a
+        # synthetic placeholder Scan so the FK constraint on ExploitRun
+        # is satisfied even when the operator hasn't run a scan yet.
+        scan_id = payload.get("scan_id")
+        with session_scope() as s:
+            scan = None
+            if scan_id:
+                try:
+                    scan = s.get(Scan, int(scan_id))
+                except (TypeError, ValueError):
+                    scan = None
+            if scan is None:
+                scan = s.execute(
+                    select(Scan).order_by(desc(Scan.id)).limit(1)
+                ).scalar_one_or_none()
+            if scan is None:
+                scan = Scan(
+                    target=rhosts, operator=operator, mode="exploit",
+                    status="adhoc-exploit",
+                )
+                s.add(scan)
+                s.flush()
+            scan_id = scan.id
+
+        catalog_entry = find_by_module(module) or {}
+        merged_options = dict(catalog_entry.get("options") or {})
+        for k, v in (payload.get("options") or {}).items():
+            if v is None or v == "":
+                continue
+            merged_options[str(k)] = str(v)
+
+        req = ExploitRequest(
+            module=module,
+            rhosts=rhosts,
+            rport=rport,
+            lhost=(payload.get("lhost") or "").strip(),
+            lport=int(payload.get("lport") or 4444),
+            payload=(payload.get("payload")
+                     or catalog_entry.get("default_payload") or "").strip(),
+            extra_options=merged_options,
+            force_exploit=bool(payload.get("force_exploit")),
+            auto_check=bool(payload.get("auto_check", True)),
+            timeout=float(payload.get("timeout") or 90.0),
+        )
+
+        # Persist a 'running' row up-front so the audit trail survives
+        # crashes / timeouts.
+        with session_scope() as s:
+            run = ExploitRun(
+                scan_id=scan_id, module=module, action="run",
+                options=str({**merged_options,
+                             "RHOSTS": rhosts, "RPORT": rport,
+                             "LHOST": req.lhost, "LPORT": req.lport,
+                             "PAYLOAD": req.payload,
+                             "ForceExploit": req.force_exploit,
+                             "AutoCheck": req.auto_check}),
+                status="running",
+                safe_mode=False,
+                result="(in progress)",
+            )
+            s.add(run)
+            s.flush()
+            run_id = run.id
+
+        log.info("Exploit run %s -> %s on %s:%s starting (run #%s)",
+                 module, "force" if req.force_exploit else "auto",
+                 rhosts, rport, run_id)
+
+        result = run_exploit(msf_cfg, req)
+
+        with session_scope() as s:
+            row = s.get(ExploitRun, run_id)
+            if row is not None:
+                row.status = result.status
+                row.result = result.output[-4000:] if result.output else ""
+
+        log.info("Exploit run #%s finished status=%s in %.1fs",
+                 run_id, result.status, result.duration_seconds)
+
+        return jsonify({
+            "run_id": run_id,
+            "module": result.module,
+            "status": result.status,
+            "hint": result.hint,
+            "options": result.options,
+            "duration_seconds": round(result.duration_seconds, 1),
+            "output": result.output,
+            "error": result.error,
+        })
 
     # ----------------- Error handlers -----------------
     @app.errorhandler(500)
