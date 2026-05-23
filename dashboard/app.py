@@ -571,19 +571,70 @@ def _title_from_summary(summary: str | None) -> str:
 
 
 def _recommended_module(svc) -> str:
+    """Map an Nmap service name to a *safe* Metasploit auxiliary scanner.
+
+    Returns 'manual review' when no MSF aux scanner is appropriate -
+    typically the operator should run the suggested nmap NSE command
+    instead (see _suggest_command()).
+    """
     if not svc or not svc.name:
         return "manual review"
     name = svc.name.lower()
     table = {
+        # SSH
         "ssh": "auxiliary/scanner/ssh/ssh_version",
+        # HTTP/HTTPS - use the version probe; Tomcat-specific stuff is below
         "http": "auxiliary/scanner/http/http_version",
         "https": "auxiliary/scanner/http/http_version",
-        "smb": "auxiliary/scanner/smb/smb_ms17_010",
+        "http-proxy": "auxiliary/scanner/http/http_version",
+        "http-alt": "auxiliary/scanner/http/http_version",
+        # SMB
+        "smb": "auxiliary/scanner/smb/smb_version",
         "microsoft-ds": "auxiliary/scanner/smb/smb_ms17_010",
+        "netbios-ssn": "auxiliary/scanner/smb/smb_version",
+        # FTP
         "ftp": "auxiliary/scanner/ftp/anonymous",
+        "ftp-data": "auxiliary/scanner/ftp/ftp_version",
+        # Telnet
+        "telnet": "auxiliary/scanner/telnet/telnet_version",
+        # Mail
+        "smtp": "auxiliary/scanner/smtp/smtp_version",
+        "smtps": "auxiliary/scanner/smtp/smtp_version",
+        "pop3": "auxiliary/scanner/pop3/pop3_version",
+        "pop3s": "auxiliary/scanner/pop3/pop3_version",
+        "imap": "auxiliary/scanner/imap/imap_version",
+        "imaps": "auxiliary/scanner/imap/imap_version",
+        # Databases
         "mysql": "auxiliary/scanner/mysql/mysql_version",
         "postgresql": "auxiliary/scanner/postgres/postgres_version",
+        "postgres": "auxiliary/scanner/postgres/postgres_version",
+        "mssql": "auxiliary/scanner/mssql/mssql_ping",
+        "ms-sql-s": "auxiliary/scanner/mssql/mssql_ping",
+        "redis": "auxiliary/scanner/redis/redis_server",
+        "oracle": "auxiliary/scanner/oracle/tnslsnr_version",
+        # Remote access
+        "rdp": "auxiliary/scanner/rdp/cve_2019_0708_bluekeep",
         "ms-wbt-server": "auxiliary/scanner/rdp/cve_2019_0708_bluekeep",
+        "vnc": "auxiliary/scanner/vnc/vnc_none_auth",
+        # Network services
+        "snmp": "auxiliary/scanner/snmp/snmp_enum",
+        "ntp": "auxiliary/scanner/ntp/ntp_monlist",
+        "domain": "auxiliary/scanner/dns/dns_amp",
+        "dns": "auxiliary/scanner/dns/dns_amp",
+        "ldap": "auxiliary/scanner/ldap/ldap_login",
+        "ldaps": "auxiliary/scanner/ldap/ldap_login",
+        # File sharing
+        "nfs": "auxiliary/scanner/nfs/nfsmount",
+        "rpcbind": "auxiliary/scanner/portmap/portmap_amp",
+        "sunrpc": "auxiliary/scanner/portmap/portmap_amp",
+        # Virtualization
+        "vmware-auth": "auxiliary/scanner/vmware/esx_fingerprint",
+        # Services with no good MSF aux scanner - fall through to "manual
+        # review" which will tell the user to use the Command button:
+        # ajp13, ircd, nntp, x11, finger, distccd, ident, time, daytime,
+        # bindshell, exec, login, shell (Metasploitable's r-services),
+        # tomcat (covered by http_version + nmap NSE), couchdb,
+        # elasticsearch, etc.
     }
     return table.get(name, "manual review")
 
@@ -603,7 +654,11 @@ def _severity_label(cvss: float | None) -> str:
 
 
 def _suggest_command(svc, target: str) -> str:
-    """Return a copy-pasteable command for the service."""
+    """Return a copy-pasteable command for the service.
+
+    For services without a Metasploit aux scanner this is the primary
+    safe-investigation tool the operator should reach for.
+    """
     name = (svc.name or "").lower()
     port = svc.port
     if name == "ssh":
@@ -611,42 +666,149 @@ def _suggest_command(svc, target: str) -> str:
             f"# Banner + algos + cipher audit\n"
             f"nmap -sV -p {port} --script ssh2-enum-algos,ssh-auth-methods {target}"
         )
-    if name in ("http", "https"):
+    if name in ("http", "https", "http-proxy", "http-alt"):
         scheme = "https" if name == "https" else "http"
         return (
             f"# HTTP fingerprint + common files\n"
             f"nmap -sV -p {port} --script http-enum,http-headers,http-methods,"
-            f"http-title {target}\n"
+            f"http-title,http-server-header {target}\n"
             f"curl -sI {scheme}://{target}:{port}/"
         )
     if name in ("smb", "microsoft-ds", "netbios-ssn"):
         return (
             f"# SMB version + EternalBlue check (non-exploit)\n"
             f"nmap -sV -p {port} --script smb-protocols,smb2-security-mode,"
-            f"smb-vuln-ms17-010 {target}"
+            f"smb-enum-shares,smb-vuln-ms17-010 {target}"
+        )
+    if name in ("ajp13", "ajp"):
+        return (
+            f"# AJP13 (Tomcat) - Ghostcat CVE-2020-1938 detection\n"
+            f"nmap -sV -p {port} --script ajp-headers,ajp-methods,ajp-request,"
+            f"ajp-auth {target}"
         )
     if name == "ftp":
         return (
-            f"# FTP version + anon login\n"
-            f"nmap -sV -p {port} --script ftp-anon,ftp-syst {target}"
+            f"# FTP version + anon login + bounce check\n"
+            f"nmap -sV -p {port} --script ftp-anon,ftp-syst,ftp-bounce {target}"
+        )
+    if name == "telnet":
+        return (
+            f"# Telnet banner + supported encryption\n"
+            f"nmap -sV -p {port} --script telnet-encryption,telnet-ntlm-info {target}"
         )
     if name == "mysql":
         return (
-            f"# MySQL version + empty password check\n"
-            f"nmap -sV -p {port} --script mysql-info,mysql-empty-password {target}"
+            f"# MySQL info + empty-password + variables\n"
+            f"nmap -sV -p {port} --script mysql-info,mysql-empty-password,"
+            f"mysql-variables {target}"
         )
-    if name == "postgresql":
+    if name in ("postgresql", "postgres"):
         return (
-            f"nmap -sV -p {port} --script pgsql-brute {target}    # safe = NO\n"
+            f"# PostgreSQL version probe (avoid pgsql-brute - not safe)\n"
             f"nmap -sV -p {port} {target}"
         )
-    if name == "ms-wbt-server":
+    if name in ("mssql", "ms-sql-s"):
         return (
-            f"# RDP - BlueKeep non-exploit check\n"
-            f"nmap -sV -p {port} --script rdp-vuln-ms12-020,rdp-enum-encryption "
-            f"{target}"
+            f"# MSSQL info + ntlm-info\n"
+            f"nmap -sV -p {port} --script ms-sql-info,ms-sql-ntlm-info {target}"
         )
-    return f"nmap -sV -sC -p {port} {target}"
+    if name == "redis":
+        return (
+            f"# Redis info (NOAUTH if exposed)\n"
+            f"nmap -sV -p {port} --script redis-info {target}"
+        )
+    if name == "mongodb":
+        return (
+            f"# MongoDB build info (avoid mongodb-brute)\n"
+            f"nmap -sV -p {port} --script mongodb-info {target}"
+        )
+    if name == "smtp":
+        return (
+            f"# SMTP banner + commands + open relay test\n"
+            f"nmap -sV -p {port} --script smtp-commands,smtp-enum-users,"
+            f"smtp-open-relay {target}"
+        )
+    if name in ("pop3", "pop3s"):
+        return (
+            f"# POP3 capabilities\n"
+            f"nmap -sV -p {port} --script pop3-capabilities,pop3-ntlm-info {target}"
+        )
+    if name in ("imap", "imaps"):
+        return (
+            f"# IMAP capabilities\n"
+            f"nmap -sV -p {port} --script imap-capabilities,imap-ntlm-info {target}"
+        )
+    if name in ("ldap", "ldaps"):
+        return (
+            f"# LDAP root DSE + naming contexts\n"
+            f"nmap -sV -p {port} --script ldap-rootdse,ldap-search {target}"
+        )
+    if name in ("dns", "domain"):
+        return (
+            f"# DNS recursion + zone transfer attempt\n"
+            f"nmap -sV -p {port} --script dns-recursion,dns-zone-transfer "
+            f"--script-args dns-zone-transfer.domain=<DOMAIN> {target}"
+        )
+    if name == "ntp":
+        return (
+            f"# NTP info + monlist amplification check\n"
+            f"nmap -sV -p {port} --script ntp-info,ntp-monlist -sU {target}"
+        )
+    if name == "snmp":
+        return (
+            f"# SNMP system info (try public/private; -sU for UDP)\n"
+            f"nmap -sV -p {port} -sU --script snmp-info,snmp-sysdescr,"
+            f"snmp-interfaces {target}"
+        )
+    if name in ("ms-wbt-server", "rdp"):
+        return (
+            f"# RDP - BlueKeep non-exploit check + encryption\n"
+            f"nmap -sV -p {port} --script rdp-vuln-ms12-020,rdp-enum-encryption,"
+            f"rdp-ntlm-info {target}"
+        )
+    if name == "vnc":
+        return (
+            f"# VNC info (auth methods)\n"
+            f"nmap -sV -p {port} --script vnc-info,vnc-title {target}"
+        )
+    if name == "nfs":
+        return (
+            f"# NFS shares + mounts\n"
+            f"nmap -sV -p {port} --script nfs-ls,nfs-showmount,nfs-statfs {target}"
+        )
+    if name in ("rpcbind", "sunrpc"):
+        return (
+            f"# RPC services exposed via portmapper\n"
+            f"nmap -sV -p {port} --script rpcinfo {target}\n"
+            f"rpcinfo -p {target}"
+        )
+    if name in ("exec", "shell", "login"):
+        return (
+            f"# Berkeley r-services (ancient, on Metasploitable)\n"
+            f"nmap -sV -p {port} {target}\n"
+            f"# rsh / rlogin / rexec - no NSE coverage; banner grab manually."
+        )
+    if name == "distccd":
+        return (
+            f"# distcc CVE-2004-2687 - command exec via build daemon\n"
+            f"nmap -sV -p {port} --script distcc-cve2004-2687 {target}"
+        )
+    if name == "x11":
+        return (
+            f"# X11 access without auth check\n"
+            f"nmap -sV -p {port} --script x11-access {target}"
+        )
+    if name == "ircd":
+        return (
+            f"# IRC info + UnrealIRCd backdoor (CVE-2010-2075)\n"
+            f"nmap -sV -p {port} --script irc-info,irc-unrealircd-backdoor {target}"
+        )
+    if name == "finger":
+        return (
+            f"# Finger user enumeration\n"
+            f"nmap -sV -p {port} --script finger {target}"
+        )
+    return f"# Generic version + default scripts\nnmap -sV -sC -p {port} {target}"
 
 
 def _ai_recommendation(scan: Scan, findings: list[dict]) -> str:
@@ -733,11 +895,17 @@ def _do_msf_check(s, svc, target: str):
 
     module_path = _recommended_module(svc)
     if module_path == "manual review":
+        cmd = _suggest_command(svc, target)
         return jsonify({
             "action": "check",
             "status": "skipped",
-            "output": (f"No safe auxiliary module is registered for "
-                       f"service '{svc.name}'. Manual review required."),
+            "output": (
+                f"No safe Metasploit auxiliary scanner is registered for "
+                f"service '{svc.name}'.\n\n"
+                f"Use the COMMAND button instead - it returns this nmap NSE "
+                f"recipe tailored for {svc.name}:\n\n"
+                f"{cmd}"
+            ),
         })
     if not is_safe(module_path):
         return jsonify({
