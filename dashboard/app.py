@@ -82,6 +82,9 @@ def create_app() -> Flask:
                 {
                     "id": scan.id, "target": scan.target, "mode": scan.mode,
                     "status": scan.status, "operator": scan.operator,
+                    "started_at": scan.started_at.isoformat() if scan.started_at else None,
+                    "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
+                    "notes": scan.notes,
                     "services": services, "vulnerabilities": vulns,
                     "exploit_runs": runs,
                 }
