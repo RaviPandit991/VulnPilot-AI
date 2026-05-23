@@ -964,49 +964,14 @@ def _do_msf_check(s, svc, target: str):
         log.exception("MSF check failed")
         run.status = "error"
         run.result = f"{type(exc).__name__}: {exc}"
-        msg = str(exc).lower()
-        # Give targeted help for the two most common failure modes.
-        if "authentic" in msg or "auth fail" in msg:
-            hint = (
-                "AUTH FAILED. The password in configs/config.yaml does not\n"
-                "match what msfrpcd was started with.\n\n"
-                "Diagnose:\n"
-                "  1. Restart msfrpcd with a known password and explicit user:\n"
-                "       msfrpcd -P labpass -S -a 127.0.0.1 -U msf\n"
-                "  2. Edit configs/config.yaml metasploit.password to match\n"
-                "     (use double quotes around the value).\n"
-                "  3. Restart the dashboard.\n"
-                "  4. Test creds independently with:\n"
-                "       python3 -c \"from pymetasploit3.msfrpc import "
-                "MsfRpcClient as C; \\\n"
-                "                    print(C('labpass', server='127.0.0.1', "
-                "port=55553, ssl=False).core.version)\""
-            )
-        elif "refused" in msg or "connection" in msg or "timed out" in msg:
-            hint = (
-                "CONNECTION FAILED. msfrpcd doesn't appear to be running.\n\n"
-                "Start it in another terminal:\n"
-                "  msfrpcd -P <password> -S -a 127.0.0.1 -U msf\n"
-                "Verify it's listening:\n"
-                "  ss -ltnp | grep 55553"
-            )
-        elif "no module" in msg or "module not found" in msg:
-            hint = (
-                f"MODULE NOT FOUND. Metasploit doesn't recognize\n"
-                f"  {module_path}\n"
-                "This module may have been renamed or moved in your MSF\n"
-                "install. Check msfconsole with:  search "
-                f"{module_path.split('/')[-1]}"
-            )
-        else:
-            hint = (
-                "Check that msfrpcd is running and the password in\n"
-                "configs/config.yaml matches what you passed to it.\n"
-                "Verify with: ss -ltnp | grep 55553"
-            )
         return jsonify({
             "action": "check", "status": "error", "module": module_path,
-            "output": f"MSF call failed: {exc}\n\n{hint}",
+            "output": (
+                f"MSF call failed: {exc}\n\n"
+                "Check that msfrpcd is running and the password in "
+                "configs/config.yaml matches what you passed to it.\n"
+                "Verify with: ss -ltnp | grep 55553"
+            ),
         }), 500
 
     # Persist final result
