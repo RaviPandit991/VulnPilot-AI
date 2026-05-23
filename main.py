@@ -42,7 +42,11 @@ def run_pipeline(
     engine: Optional[str] = None,
     auth_ref: Optional[str] = None,
 ) -> dict:
-    """Execute the full scan pipeline. Returns the generated report dict."""
+    """Execute the full scan pipeline. Returns the generated report dict.
+
+    Any exception inside a stage is caught and the scan row is marked
+    `error` (or `partial` if at least the recon stage produced data).
+    """
     settings = get_settings()
     engine = engine or settings.get("scanner.engine", "nmap")
 
@@ -62,80 +66,105 @@ def run_pipeline(
             s.flush()
             scan_id = scan_row.id
 
-    # 2) Recon
-    log.info("[1/5] Port + service scan (%s)", engine)
-    if engine == "rustscan":
-        services = rustscan_scanner.scan(
-            target, settings.get("scanner.rustscan_args", "")
-        )
-    else:
-        services = nmap_scanner.scan(
-            target, settings.get("scanner.nmap_args", "-sV -sC -T4 --top-ports 1000")
-        )
+    services: list = []
+    mapped: list = []
+    plans: list = []
+    results: list[ModuleResult] = []
+    final_status = "complete"
+    error_note: str | None = None
 
-    # 3) CVE mapping
-    log.info("[2/5] CVE mapping for %d services", len(services))
-    mapped = cve_mapper.map_services(services)
-
-    # 4) Decision engine
-    log.info("[3/5] Building safe-validation plan")
-    plans = decision_engine.build_plan(mapped)
-    if settings.get("ai.use_local_llm"):
-        plans = decision_engine.llm_augment(plans, settings.get("ai.llm_model"))
-
-    # 5) Module selection (allowlist enforced)
-    selections = module_selector.select(target, plans)
-    log.info("[4/5] %d safe modules selected", len(selections))
-
-    # 6) Metasploit validation (opt-in)
-    results: List[ModuleResult] = []
-    msf_cfg = settings.section("metasploit")
-    if msf_cfg.get("enabled"):
-        try:
-            client = MetasploitClient(
-                host=msf_cfg.get("host", "127.0.0.1"),
-                port=int(msf_cfg.get("port", 55553)),
-                username=msf_cfg.get("username", "msf"),
-                password=msf_cfg.get("password", "msf"),
-                ssl=bool(msf_cfg.get("ssl", False)),
-                enabled=True,
+    try:
+        # 2) Recon
+        log.info("[1/5] Port + service scan (%s)", engine)
+        if engine == "rustscan":
+            services = rustscan_scanner.scan(
+                target, settings.get("scanner.rustscan_args", "")
             )
-            client.connect()
-            results = metasploit_client.run_all(client, selections)
-        except MetasploitDisabled as exc:
-            log.warning("Skipping Metasploit step: %s", exc)
-        except Exception:
-            log.exception("Metasploit validation failed")
-    else:
-        log.info("Metasploit disabled in config; skipping validation step.")
+        else:
+            services = nmap_scanner.scan(
+                target,
+                settings.get("scanner.nmap_args", "-sV -sC -T4 --top-ports 1000"),
+            )
 
-    # 7) Persist findings
-    _persist(scan_id, mapped, results)
+        # 3) CVE mapping
+        log.info("[2/5] CVE mapping for %d services", len(services))
+        mapped = cve_mapper.map_services(services)
 
-    # 8) Report
+        # 4) Decision engine
+        log.info("[3/5] Building safe-validation plan")
+        plans = decision_engine.build_plan(mapped)
+        if settings.get("ai.use_local_llm"):
+            plans = decision_engine.llm_augment(plans, settings.get("ai.llm_model"))
+
+        # 5) Module selection (allowlist enforced)
+        selections = module_selector.select(target, plans)
+        log.info("[4/5] %d safe modules selected", len(selections))
+
+        # 6) Metasploit validation (opt-in)
+        msf_cfg = settings.section("metasploit")
+        if msf_cfg.get("enabled"):
+            try:
+                client = MetasploitClient(
+                    host=msf_cfg.get("host", "127.0.0.1"),
+                    port=int(msf_cfg.get("port", 55553)),
+                    username=msf_cfg.get("username", "msf"),
+                    password=msf_cfg.get("password", "msf"),
+                    ssl=bool(msf_cfg.get("ssl", False)),
+                    enabled=True,
+                )
+                client.connect()
+                results = metasploit_client.run_all(client, selections)
+            except MetasploitDisabled as exc:
+                log.warning("Skipping Metasploit step: %s", exc)
+            except Exception:
+                log.exception("Metasploit validation failed")
+        else:
+            log.info("Metasploit disabled in config; skipping validation step.")
+
+    except Exception as exc:
+        log.exception("Scan pipeline failed mid-run")
+        error_note = f"{type(exc).__name__}: {exc}"
+        # If recon already produced services, the report is still useful.
+        final_status = "partial" if services else "error"
+
+    # 7) Persist findings (best-effort)
+    try:
+        _persist(scan_id, mapped, results)
+    except Exception:
+        log.exception("Persisting findings failed")
+
+    # 8) Report - always attempt, even on partial runs
     log.info("[5/5] Generating report")
-    report = report_generator.build_report(
-        target=target, operator=operator, mode=mode,
-        mapped=mapped, plans=plans, results=results,
-    )
-    out_dir = settings.get("reporting.output_dir", "reports")
-    formats = settings.get("reporting.formats", ["json", "markdown"])
-    if "json" in formats:
-        report_generator.write_json(report, out_dir)
-    if "markdown" in formats:
-        report_generator.write_markdown(report, out_dir)
-    if "pdf" in formats:
-        try:
-            from reporting.pdf_export import write_pdf
-            write_pdf(report, out_dir)
-        except Exception:
-            log.exception("PDF export failed (non-fatal)")
+    try:
+        report = report_generator.build_report(
+            target=target, operator=operator, mode=mode,
+            mapped=mapped, plans=plans, results=results,
+        )
+        out_dir = settings.get("reporting.output_dir", "reports")
+        formats = settings.get("reporting.formats", ["json", "markdown"])
+        if "json" in formats:
+            report_generator.write_json(report, out_dir)
+        if "markdown" in formats:
+            report_generator.write_markdown(report, out_dir)
+        if "pdf" in formats:
+            try:
+                from reporting.pdf_export import write_pdf
+                write_pdf(report, out_dir)
+            except Exception:
+                log.exception("PDF export failed (non-fatal)")
+    except Exception as exc:
+        log.exception("Report generation failed")
+        error_note = error_note or f"report: {exc}"
+        final_status = "error"
+        report = {"error": str(exc)}
 
     with session_scope() as s:
         scan_row = s.get(Scan, scan_id)
         if scan_row:
-            scan_row.status = "complete"
+            scan_row.status = final_status
             scan_row.finished_at = datetime.now(timezone.utc)
+            if error_note:
+                scan_row.notes = error_note[:2000]
 
     return report
 
