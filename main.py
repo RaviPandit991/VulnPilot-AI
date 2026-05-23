@@ -283,6 +283,10 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd = sub.add_parser("initdb", help="Initialize the database schema")
     init_cmd.set_defaults(func=_cmd_initdb)
 
+    # Optional add-on: exploit-test feature. See exploit_engine/exploit_runner.
+    from exploit_engine.exploit_cli import register_exploit_subcommand
+    register_exploit_subcommand(sub)
+
     return p
 
 

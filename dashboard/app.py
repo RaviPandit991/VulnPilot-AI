@@ -149,11 +149,12 @@ def create_app() -> Flask:
 
     @app.get("/exploits")
     def exploits():
+        # Wired to the real exploit-test feature (dashboard.exploit_routes
+        # owns the API; this route just renders the page).
         return render_template(
-            "_simple_page.html", active="exploits",
-            page_title="Exploits", icon="zap",
-            description=("Curated, allowlist-only Metasploit auxiliary modules. "
-                         "Available once you enable Metasploit in config."),
+            "exploits.html", active="exploits",
+            page_title="Exploit Test",
+            exploit_enabled=os.environ.get("VULNPILOT_ALLOW_EXPLOIT") == "1",
         )
 
     @app.get("/sessions")
@@ -513,6 +514,10 @@ def create_app() -> Flask:
             f"</pre>",
             500,
         )
+
+    # Optional add-on: exploit-test API blueprint.
+    from dashboard.exploit_routes import exploit_bp
+    app.register_blueprint(exploit_bp)
 
     return app
 
