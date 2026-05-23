@@ -1,6 +1,8 @@
 {# Top bar with workspace selector, status pill, notifications, user #}
 <header class="h-14 shrink-0 bg-ink-900/70 backdrop-blur border-b border-ink-700/60 flex items-center px-4 gap-4 z-10"
-        x-data="{ notifOpen:false, userOpen:false }">
+        x-data="{ notifOpen:false, userOpen:false, msf:null,
+                   async refreshMsf(){ try{ this.msf = await fetch('/api/msf/status').then(r=>r.json()); }catch(_){ this.msf={enabled:false,reachable:false}; } } }"
+        x-init="refreshMsf(); setInterval(()=>refreshMsf(), 10000)">
   <div class="flex items-center gap-2">
     <span class="text-sm font-semibold tracking-wide text-cyan-300">VulnPilot AI</span>
     <span class="text-slate-600">|</span>
@@ -12,6 +14,18 @@
   </div>
 
   <div class="flex-1"></div>
+
+  {# Metasploit reachability pill #}
+  <div class="flex items-center gap-2 rounded-full px-3 py-1 text-xs border"
+       :class="!msf || !msf.enabled
+         ? 'bg-slate-500/10 border-slate-500/30 text-slate-400'
+         : (msf.reachable
+            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+            : 'bg-red-500/10 border-red-500/30 text-red-300')"
+       :title="msf ? msf.message : 'checking...'">
+    <i data-lucide="zap" class="w-3 h-3"></i>
+    <span x-text="!msf || !msf.enabled ? 'MSF off' : (msf.reachable ? 'MSF live' : 'MSF down')"></span>
+  </div>
 
   {# Engagement status pill - reflects whether VULNPILOT_AUTHORIZED is set #}
   <div class="flex items-center gap-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 px-3 py-1 text-xs text-emerald-300">
