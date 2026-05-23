@@ -50,6 +50,80 @@
       <h2>Scan Detail</h2>
       <pre id="detail"></pre>
     </section>
+
+    <section class="card exploit-card">
+      <h2>Exploit Test <span class="tag warn-tag">authorized lab use only</span></h2>
+      <p class="muted">
+        Defaults to <strong>check-only</strong> (validates vulnerability without
+        delivering a payload). Switching to "actually exploit" requires
+        <code>VULNPILOT_ALLOW_EXPLOIT=1</code> and <code>VULNPILOT_AUTHORIZED=1</code>
+        in the server environment.
+      </p>
+      <div id="exploit-status-banner" class="banner" hidden></div>
+      <form id="exploit-form">
+        <div class="grid-2">
+          <label>Target IP / hostname
+            <input name="target" required placeholder="192.168.56.101" />
+          </label>
+          <label>Port (optional - overrides template default)
+            <input name="port" type="number" min="1" max="65535" placeholder="21" />
+          </label>
+        </div>
+        <label>Exploit template
+          <select name="template_id" id="exploit-template-select" required>
+            <option value="">Loading catalog...</option>
+          </select>
+        </label>
+        <div id="exploit-template-meta" class="meta" hidden></div>
+
+        <div class="grid-2">
+          <label>Operator
+            <input name="operator" required placeholder="alice@corp" />
+          </label>
+          <label>Written authorization ref
+            <input name="authorization_ref" required placeholder="SOW-2026-001" />
+          </label>
+        </div>
+
+        <fieldset class="exploit-mode">
+          <legend>Mode</legend>
+          <label class="inline">
+            <input type="radio" name="check_only" value="true" checked />
+            Check only (recommended)
+          </label>
+          <label class="inline">
+            <input type="radio" name="check_only" value="false" />
+            Actually exploit
+          </label>
+        </fieldset>
+
+        <div id="exploit-payload-fields" class="grid-3" hidden>
+          <label>Payload (optional override)
+            <input name="payload" placeholder="cmd/unix/reverse" />
+          </label>
+          <label>LHOST (your IP)
+            <input name="lhost" placeholder="192.168.56.1" />
+          </label>
+          <label>LPORT
+            <input name="lport" type="number" min="1" max="65535" placeholder="4444" />
+          </label>
+          <label class="inline span-3">
+            <input type="checkbox" name="force" />
+            Allow high-risk modules (e.g. EternalBlue) to actually run
+          </label>
+        </div>
+
+        <label>
+          Type <code>I AUTHORIZE</code> to confirm
+          <input name="confirmation" required pattern="I AUTHORIZE"
+                 placeholder="I AUTHORIZE" autocomplete="off" />
+        </label>
+
+        <button type="submit" class="danger">Run exploit test</button>
+      </form>
+      <div id="exploit-status" class="status"></div>
+      <pre id="exploit-result" hidden></pre>
+    </section>
   </main>
 
   <script src="/static/app.js"></script>

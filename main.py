@@ -16,7 +16,13 @@ from ai_engine import cve_mapper, decision_engine
 from configs.settings import get_settings
 from database.db import init_db, session_scope
 from database.models import ExploitRun, Scan, Service, Vulnerability
-from exploit_engine import metasploit_client, module_selector
+from exploit_engine import exploit_catalog, metasploit_client, module_selector
+from exploit_engine.exploit_runner import (
+    ExploitDisabled,
+    ExploitNotAllowed,
+    ExploitOutcome,
+    ExploitRunner,
+)
 from exploit_engine.metasploit_client import (
     MetasploitClient,
     MetasploitDisabled,
@@ -26,7 +32,6 @@ from reporting import report_generator
 from scanner import nmap_scanner, rustscan_scanner
 from utils.auth_check import AuthorizationError, require_authorization
 from utils.logger import get_logger, setup_logging
-
 log = get_logger(__name__)
 
 
@@ -219,6 +224,211 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Exploit subcommand
+# ---------------------------------------------------------------------------
+def _cmd_exploit(args: argparse.Namespace) -> int:
+    """Run a single exploit template against a target port.
+
+    Defaults to `check`-only (validates vulnerability without delivering a
+    payload). Pass --actually-exploit AND set VULNPILOT_ALLOW_EXPLOIT=1 to
+    actually fire the exploit.
+    """
+    settings = get_settings()
+
+    # 1) List catalog and exit if requested
+    if args.list_catalog:
+        _print_catalog()
+        return 0
+
+    if not args.target:
+        print("--target is required (or use --list-catalog).", file=sys.stderr)
+        return 2
+
+    # 2) Resolve which template(s) to run
+    templates = _resolve_templates(args)
+    if not templates:
+        if args.module:
+            print(f"Unknown exploit template: {args.module!r}", file=sys.stderr)
+            print("Use --list-catalog to see available templates.", file=sys.stderr)
+        else:
+            print(
+                f"No exploit templates match port {args.port}. "
+                "Try --list-catalog to see what's supported.",
+                file=sys.stderr,
+            )
+        return 2
+
+    # 3) Authorization gate (mode is forced to 'exploit')
+    try:
+        auth = require_authorization(
+            args.target,
+            operator=args.operator,
+            mode="exploit",
+            non_interactive=args.non_interactive,
+            written_auth_ref=args.auth_ref,
+        )
+    except AuthorizationError as exc:
+        print(f"AUTHORIZATION REQUIRED: {exc}", file=sys.stderr)
+        return 2
+
+    # 4) Decide check-only vs actually-exploit. Config can globally force check-only.
+    force_check_only_cfg = bool(settings.get("exploit.force_check_only", False))
+    check_only = True
+    if args.actually_exploit and not force_check_only_cfg:
+        check_only = False
+    elif args.actually_exploit and force_check_only_cfg:
+        log.warning(
+            "exploit.force_check_only=true in config; ignoring --actually-exploit"
+        )
+
+    # 5) Build Metasploit client (must be enabled in config)
+    msf_cfg = settings.section("metasploit")
+    if not msf_cfg.get("enabled"):
+        print(
+            "Metasploit integration is disabled in config. "
+            "Set metasploit.enabled: true in configs/config.yaml and run msfrpcd.",
+            file=sys.stderr,
+        )
+        return 3
+
+    client = MetasploitClient(
+        host=msf_cfg.get("host", "127.0.0.1"),
+        port=int(msf_cfg.get("port", 55553)),
+        username=msf_cfg.get("username", "msf"),
+        password=msf_cfg.get("password", "msf"),
+        ssl=bool(msf_cfg.get("ssl", False)),
+        enabled=True,
+    )
+    try:
+        client.connect()
+    except MetasploitDisabled as exc:
+        print(f"Metasploit unavailable: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        log.exception("Could not connect to msfrpcd")
+        print(f"Could not connect to msfrpcd: {exc}", file=sys.stderr)
+        return 3
+
+    # 6) Build runner (re-validates authorization + env)
+    try:
+        runner = ExploitRunner(client, authorization=auth)
+    except ExploitDisabled as exc:
+        print(f"Exploit feature gated: {exc}", file=sys.stderr)
+        return 2
+
+    # 7) Persist a Scan row so ExploitRun has a parent
+    init_db()
+    with session_scope() as s:
+        scan_row = Scan(
+            target=auth.target,
+            operator=auth.operator,
+            mode="exploit",
+            status="running",
+            authorization_ref=auth.written_authorization_ref,
+        )
+        s.add(scan_row)
+        s.flush()
+        scan_id = scan_row.id
+
+    # 8) Run each selected template
+    exploit_cfg = settings.section("exploit")
+    timeout = float(exploit_cfg.get("timeout_seconds", 180))
+    lhost = args.lhost or exploit_cfg.get("default_lhost") or None
+    lport = args.lport or exploit_cfg.get("default_lport") or None
+    payload = args.payload or exploit_cfg.get("default_payload") or None
+
+    outcomes: list[ExploitOutcome] = []
+    for template in templates:
+        try:
+            outcome = runner.run(
+                template,
+                auth.target,
+                check_only=check_only,
+                port=args.port,
+                payload=payload,
+                lhost=lhost,
+                lport=int(lport) if lport else None,
+                force=args.force,
+                timeout=timeout,
+            )
+        except ExploitNotAllowed as exc:
+            print(f"Refused to run {template.id}: {exc}", file=sys.stderr)
+            continue
+        outcomes.append(outcome)
+        _persist_exploit_outcome(scan_id, outcome)
+        _print_outcome(outcome)
+
+    # 9) Mark scan complete
+    with session_scope() as s:
+        scan_row = s.get(Scan, scan_id)
+        if scan_row:
+            scan_row.status = "complete"
+            scan_row.finished_at = datetime.now(timezone.utc)
+
+    # Exit code: 0 if any outcome was vulnerable/session-opened/completed,
+    # 1 if all errored, 0 otherwise.
+    if outcomes and all(o.status == "error" for o in outcomes):
+        return 1
+    return 0
+
+
+def _resolve_templates(args: argparse.Namespace):
+    """Pick template(s) to run based on --module or --port."""
+    if args.module:
+        tpl = exploit_catalog.get(args.module)
+        return [tpl] if tpl else []
+    if args.port:
+        return exploit_catalog.find_for_port(args.port, service=args.service)
+    return []
+
+
+def _print_catalog() -> None:
+    print("Available exploit templates:")
+    print(f"{'ID':<28} {'PORT':<6} {'SVC':<10} {'RISK':<10} TITLE")
+    print("-" * 90)
+    for tpl in exploit_catalog.list_all():
+        cves = ",".join(tpl.cve_ids) if tpl.cve_ids else "-"
+        print(
+            f"{tpl.id:<28} {tpl.default_port:<6} {tpl.service:<10} "
+            f"{tpl.risk:<10} {tpl.title}"
+        )
+        if tpl.cve_ids:
+            print(f"{'':<28} CVEs: {cves}")
+    print()
+    print("All listed modules are also pinned in module_selector.EXPLOIT_ALLOWLIST.")
+
+
+def _print_outcome(o: ExploitOutcome) -> None:
+    line = (
+        f"[{o.status.upper():<14}] {o.module}  action={o.action}  "
+        f"target={o.target}:{o.port}  in {o.duration_seconds:.1f}s"
+    )
+    print(line)
+    if o.session_id:
+        print(f"  session: {o.session_id}")
+    for note in o.notes:
+        print(f"  note: {note}")
+    snippet = o.output.strip().splitlines()
+    for ln in snippet[-6:]:
+        print(f"  | {ln}")
+
+
+def _persist_exploit_outcome(scan_id: int, outcome: ExploitOutcome) -> None:
+    with session_scope() as s:
+        s.add(
+            ExploitRun(
+                scan_id=scan_id,
+                module=outcome.module,
+                action=outcome.action,
+                options=str(outcome.options),
+                result=(outcome.output or "")[:8000],
+                status=outcome.status,
+                safe_mode=(outcome.action == "check"),
+            )
+        )
+
+
 def _cmd_initdb(_: argparse.Namespace) -> int:
     init_db()
     print("Database initialized.")
@@ -249,6 +459,35 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--host", default=None)
     dash.add_argument("--port", type=int, default=None)
     dash.set_defaults(func=_cmd_dashboard)
+
+    expl = sub.add_parser(
+        "exploit",
+        help="Test a single exploit against a target port (check-only by default)",
+    )
+    expl.add_argument("--target", help="IP or hostname (must be in authorized scope)")
+    expl.add_argument("--port", type=int, help="Target port to test")
+    expl.add_argument("--service", help="Service hint (ftp, smb, http, ...)")
+    expl.add_argument("--module", help="Exploit template id (see --list-catalog)")
+    expl.add_argument("--list-catalog", action="store_true",
+                      help="Print the exploit catalog and exit")
+    expl.add_argument("--operator", default=None, help="Operator identity for audit")
+    expl.add_argument("--auth-ref", dest="auth_ref",
+                      help="Reference to written authorization (SOW/ticket)")
+    expl.add_argument("--actually-exploit", action="store_true",
+                      help="Run the real exploit, not just check(). "
+                           "Requires VULNPILOT_ALLOW_EXPLOIT=1.")
+    expl.add_argument("--payload", default=None,
+                      help="Override default payload (only used with --actually-exploit)")
+    expl.add_argument("--lhost", default=None, help="Reverse-handler listen host")
+    expl.add_argument("--lport", type=int, default=None,
+                      help="Reverse-handler listen port")
+    expl.add_argument("--force", action="store_true",
+                      help="Allow high-risk modules (e.g. EternalBlue) to actually exploit")
+    expl.add_argument("--non-interactive", action="store_true",
+                      help="Require VULNPILOT_AUTHORIZED=1 instead of prompt")
+    expl.add_argument("--i-have-authorization", dest="ack",
+                      action="store_true", help=argparse.SUPPRESS)
+    expl.set_defaults(func=_cmd_exploit)
 
     init_cmd = sub.add_parser("initdb", help="Initialize the database schema")
     init_cmd.set_defaults(func=_cmd_initdb)

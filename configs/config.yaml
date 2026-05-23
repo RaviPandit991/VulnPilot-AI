@@ -18,6 +18,17 @@ metasploit:
   ssl: false
   enabled: false        # require explicit opt-in
 
+exploit:
+  # Default reverse-handler settings used when running templates with
+  # `--actually-exploit` (CLI) or the dashboard exploit panel.
+  default_lhost: ""     # your attacker IP (e.g. 192.168.56.1) - required for reverse payloads
+  default_lport: 4444
+  default_payload: ""   # if empty, the template's recommended payload is used
+  timeout_seconds: 180
+  # If true, even allowlisted exploit modules will be forced to check-only.
+  # Useful as an extra brake when sharing the codebase across a team.
+  force_check_only: false
+
 ai:
   use_local_llm: false
   llm_model: ""         # e.g. "mistralai/Mistral-7B-Instruct-v0.2"
