@@ -235,8 +235,12 @@ function reconPage() {
           body: JSON.stringify({ action, confirm: true }),
         });
         const data = await resp.json();
+        const optsLine = data.options
+          ? 'options: ' + Object.entries(data.options).map(([k, v]) => `${k}=${v}`).join(' ') + '\n'
+          : '';
         this.exploitOutput[svc.id] =
           (data.module ? `module: ${data.module}\n` : '') +
+          optsLine +
           (data.duration_seconds !== undefined ? `duration: ${data.duration_seconds}s\n` : '') +
           (data.run_id !== undefined ? `run #${data.run_id}\n` : '') +
           `status: ${data.status || 'unknown'}\n\n` +

