@@ -1,0 +1,42 @@
+{# Vertical icon navigation rail #}
+<aside class="w-16 shrink-0 bg-ink-900/80 backdrop-blur border-r border-ink-700/60 flex flex-col items-center py-3 z-10">
+  <a href="{{ url_for('index') }}" class="mb-4 flex flex-col items-center gap-1 group">
+    <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center shadow-glow-cyan">
+      <i data-lucide="shield-alert" class="w-5 h-5 text-ink-950"></i>
+    </div>
+  </a>
+
+  <nav class="flex flex-col items-stretch gap-1 mt-2 w-full px-2">
+    {% set nav = [
+      ('dashboard', url_for('dashboard_home'), 'layout-dashboard', 'Dashboard'),
+      ('targets',   url_for('targets'),         'crosshair',         'Targets'),
+      ('recon',     url_for('recon'),           'radar',             'Recon'),
+      ('scans',     url_for('scans'),           'activity',          'Scans'),
+      ('exploits',  url_for('exploits'),        'zap',               'Exploits'),
+      ('sessions',  url_for('sessions'),        'terminal',          'Sessions'),
+      ('reports',   url_for('reports'),         'file-text',         'Reports'),
+      ('ai',        url_for('ai_assistant'),    'bot',               'AI Assistant'),
+    ] %}
+    {% for key, href, icon, label in nav %}
+    <a href="{{ href }}"
+       class="group relative h-11 flex items-center justify-center rounded-md transition-colors
+              {{ 'bg-cyan-500/10 text-cyan-300 shadow-glow-cyan' if active==key else 'text-slate-400 hover:bg-ink-700/40 hover:text-slate-200' }}">
+      <i data-lucide="{{ icon }}" class="w-5 h-5"></i>
+      <span class="absolute left-full ml-3 whitespace-nowrap rounded bg-ink-800 border border-ink-600 px-2 py-1 text-xs opacity-0 group-hover:opacity-100 transition pointer-events-none z-50">
+        {{ label }}
+      </span>
+    </a>
+    {% endfor %}
+  </nav>
+
+  <div class="mt-auto flex flex-col items-stretch gap-1 w-full px-2">
+    <a href="{{ url_for('settings') }}"
+       class="group relative h-11 flex items-center justify-center rounded-md transition-colors
+              {{ 'bg-cyan-500/10 text-cyan-300' if active=='settings' else 'text-slate-400 hover:bg-ink-700/40 hover:text-slate-200' }}">
+      <i data-lucide="settings" class="w-5 h-5"></i>
+      <span class="absolute left-full ml-3 whitespace-nowrap rounded bg-ink-800 border border-ink-600 px-2 py-1 text-xs opacity-0 group-hover:opacity-100 transition pointer-events-none z-50">
+        Settings
+      </span>
+    </a>
+  </div>
+</aside>
