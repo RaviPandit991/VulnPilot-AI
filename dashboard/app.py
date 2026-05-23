@@ -1176,12 +1176,21 @@ def _do_msf_check(s, svc, target: str):
     })
 
 
-_EXPLOIT_PAYLOAD_OVERRIDES = {
-    # vsftpd 2.3.4 pre-opens a bind shell on port 6200 of the target;
-    # cmd/unix/interact just connects to that port - no LHOST needed.
-    # Without this override modern MSF auto-picks a reverse meterpreter
-    # which fails validation because we don't send LHOST.
-    "exploit/unix/ftp/vsftpd_234_backdoor": "cmd/unix/interact",
+_EXPLOIT_PAYLOAD_OVERRIDES: dict = {
+    # We deliberately do NOT pin a payload here for vsftpd_234_backdoor.
+    #
+    # The canonical "no LHOST needed" payload was cmd/unix/interact (it just
+    # connected to the bind shell the backdoor opens on port 6200), but that
+    # payload was removed from modern Metasploit. On recent MSF (e.g. Kali
+    # 2024+) `set PAYLOAD cmd/unix/interact` returns "The value specified
+    # for PAYLOAD is not valid" and MSF falls back to its compiled-in
+    # default (currently a meterpreter command stager that genuinely needs
+    # LHOST). So we let MSF pick its own default and rely on the auto-LHOST
+    # branch below to make it validate.
+    #
+    # Add an entry here only if you've confirmed the payload exists in your
+    # MSF install AND it doesn't require LHOST. Run `info <payload>` in
+    # msfconsole to check.
 }
 
 
