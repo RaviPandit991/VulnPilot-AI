@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <div class="panel">
+    <div class="panel-header px-4 py-3 flex items-center gap-2">
+      <i data-lucide="settings" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">CONFIGURATION (read-only)</h2>
+    </div>
+    <pre class="p-4 text-xs font-mono overflow-x-auto text-slate-300">{{ config_yaml }}</pre>
+    <div class="border-t border-ink-700/60 px-4 py-3 text-xs text-slate-500">
+      Edit <span class="font-mono text-cyan-300">configs/config.yaml</span> on disk and restart the dashboard to apply changes.
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header px-4 py-3 flex items-center gap-2">
+      <i data-lucide="shield" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">SAFETY POLICY</h2>
+    </div>
+    <div class="p-4 space-y-3 text-xs text-slate-300">
+      <div class="flex items-start gap-3">
+        <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"></i>
+        <div>
+          <div class="font-semibold">Authorization gate</div>
+          <div class="text-slate-500">All scans require explicit operator authorization. Public targets need <code class="font-mono text-cyan-300">VULNPILOT_ALLOW_PUBLIC=1</code>.</div>
+        </div>
+      </div>
+      <div class="flex items-start gap-3">
+        <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"></i>
+        <div>
+          <div class="font-semibold">Module allowlist</div>
+          <div class="text-slate-500">Only <code class="font-mono text-cyan-300">auxiliary/scanner/*</code>, <code class="font-mono text-cyan-300">auxiliary/gather/*</code>, and <code class="font-mono text-cyan-300">auxiliary/admin/http/*</code> can be loaded.</div>
+        </div>
+      </div>
+      <div class="flex items-start gap-3">
+        <i data-lucide="x-circle" class="w-4 h-4 text-red-400 mt-0.5 shrink-0"></i>
+        <div>
+          <div class="font-semibold">Hard denylist</div>
+          <div class="text-slate-500">Modules matching <code class="font-mono">^exploit/</code>, <code class="font-mono">dos/</code>, <code class="font-mono">payload/</code>, <code class="font-mono">post/</code>, <code class="font-mono">_overflow$</code> are rejected before they reach Metasploit.</div>
+        </div>
+      </div>
+      <div class="flex items-start gap-3">
+        <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"></i>
+        <div>
+          <div class="font-semibold">Audit trail</div>
+          <div class="text-slate-500">Every scan records operator, mode, written authorization reference, and finding count.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel lg:col-span-2">
+    <div class="panel-header px-4 py-3 flex items-center gap-2">
+      <i data-lucide="info" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">SYSTEM</h2>
+    </div>
+    <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+      <div><div class="text-slate-500 mb-1">Version</div><div class="font-mono text-cyan-300">{{ version }}</div></div>
+      <div><div class="text-slate-500 mb-1">Engine</div><div class="font-mono text-cyan-300">{{ engine }}</div></div>
+      <div><div class="text-slate-500 mb-1">Database</div><div class="font-mono text-cyan-300 truncate" title="{{ db_url }}">{{ db_url }}</div></div>
+      <div><div class="text-slate-500 mb-1">Metasploit</div><div class="font-mono" :class="'{{ msf_enabled }}' === 'True' ? 'text-emerald-300' : 'text-slate-400'">{{ 'enabled' if msf_enabled else 'disabled' }}</div></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
