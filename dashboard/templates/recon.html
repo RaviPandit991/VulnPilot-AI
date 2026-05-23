@@ -205,6 +205,13 @@
               <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'check')">
                 <i data-lucide="shield-check" class="w-3 h-3"></i> Safe Check
               </button>
+              <button class="btn !py-1 !px-2"
+                      :class="exploitReady && svc.has_exploit ? 'btn-danger' : 'btn-ghost'"
+                      :disabled="!exploitReady || !svc.has_exploit"
+                      :title="!exploitReady ? exploitMessage : (svc.has_exploit ? 'Run curated lab exploit' : 'No curated exploit registered for this service')"
+                      @click="confirmExploit(svc)">
+                <i data-lucide="zap" class="w-3 h-3"></i> Exploit
+              </button>
               <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'banner')">
                 <i data-lucide="file-text" class="w-3 h-3"></i> Banner
               </button>
@@ -292,6 +299,53 @@
         <div x-show="!modalCves.length" class="text-slate-600 italic text-center py-8">
           Loading...
         </div>
+      </div>
+    </div>
+  </div>
+
+  {# Exploit confirmation modal - hard gate before fire #}
+  <div x-show="exploitTarget" x-cloak
+       class="fixed inset-0 bg-black/80 backdrop-blur-sm z-30 flex items-center justify-center p-4"
+       @click.self="exploitTarget=null">
+    <div class="panel max-w-2xl w-full border-red-500/40" x-show="exploitTarget">
+      <div class="panel-header px-4 py-3 flex items-center justify-between bg-red-500/10">
+        <div class="flex items-center gap-2">
+          <i data-lucide="alert-triangle" class="w-5 h-5 text-red-400"></i>
+          <h3 class="text-sm font-semibold text-red-200">EXPLOIT MODE — CONFIRM FIRE</h3>
+        </div>
+        <button class="text-slate-400 hover:text-slate-200" @click="exploitTarget=null">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4 text-sm">
+        <div class="text-slate-200">
+          You are about to fire a <span class="font-mono text-red-300">real exploit</span>
+          against:
+        </div>
+        <div class="bg-ink-900/60 border border-red-500/20 rounded p-3 font-mono text-xs">
+          <div><span class="text-slate-500">Target:</span>
+            <span class="text-cyan-300" x-text="exploitTarget && (exploitTarget.target + ':' + exploitTarget.port + '/' + exploitTarget.protocol)"></span></div>
+          <div><span class="text-slate-500">Service:</span>
+            <span x-text="exploitTarget && (exploitTarget.name + ' — ' + (exploitTarget.product || '?') + ' ' + (exploitTarget.version || ''))"></span></div>
+          <div><span class="text-slate-500">Module:</span>
+            <span class="text-red-300" x-text="exploitTarget && exploitTarget.module"></span></div>
+          <div x-show="exploitReady && exploitLhost"><span class="text-slate-500">LHOST:</span>
+            <span x-text="exploitLhost + ':' + exploitLport"></span></div>
+        </div>
+        <div class="text-xs text-slate-400 leading-relaxed">
+          This may deliver a payload, open a reverse shell, modify files on
+          the target, or otherwise alter system state. <span class="text-red-300 font-semibold">Proceed only if you own the target or have explicit written authorization.</span>
+        </div>
+        <div x-show="exploitTarget && exploitTarget.cve_count" class="text-xs text-amber-300">
+          Top related CVE:
+          <span class="font-mono" x-text="exploitTarget && exploitTarget.top_cves[0] && exploitTarget.top_cves[0].cve_id"></span>
+        </div>
+      </div>
+      <div class="border-t border-ink-700/60 p-3 flex justify-end gap-2">
+        <button class="btn btn-ghost" @click="exploitTarget=null">Cancel</button>
+        <button class="btn btn-danger" @click="fireExploit()">
+          <i data-lucide="zap" class="w-3.5 h-3.5"></i> YES, FIRE EXPLOIT
+        </button>
       </div>
     </div>
   </div>
