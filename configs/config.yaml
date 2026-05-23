@@ -1,0 +1,44 @@
+# VulnPilot AI default configuration
+app:
+  name: VulnPilot AI
+  version: 0.1.0
+  mode: safe   # safe | audit | exploit
+
+scanner:
+  engine: nmap          # nmap | rustscan
+  nmap_args: "-sV -sC -T4 --top-ports 1000"
+  rustscan_args: "-b 4500 -t 2000 --ulimit 5000"
+  timeout_seconds: 600
+
+metasploit:
+  host: 127.0.0.1
+  port: 55553
+  username: msf
+  password: msf
+  ssl: false
+  enabled: false        # require explicit opt-in
+
+ai:
+  use_local_llm: false
+  llm_model: ""         # e.g. "mistralai/Mistral-7B-Instruct-v0.2"
+  rule_pack: default
+
+cve:
+  source: circl         # circl | nvd
+  cache_seconds: 86400
+
+database:
+  url: "sqlite:///data/vulnpilot.db"
+
+reporting:
+  output_dir: reports
+  formats: [json, markdown, pdf]
+
+dashboard:
+  host: 127.0.0.1
+  port: 5000
+  secret_key: "change-me-in-production"
+
+logging:
+  level: INFO
+  file: logs/vulnpilot.log
