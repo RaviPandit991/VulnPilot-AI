@@ -41,6 +41,7 @@ def run_pipeline(
     scan_id: Optional[int] = None,
     engine: Optional[str] = None,
     auth_ref: Optional[str] = None,
+    nmap_args: Optional[str] = None,
 ) -> dict:
     """Execute the full scan pipeline. Returns the generated report dict.
 
@@ -49,6 +50,9 @@ def run_pipeline(
     """
     settings = get_settings()
     engine = engine or settings.get("scanner.engine", "nmap")
+    nmap_args = nmap_args or settings.get(
+        "scanner.nmap_args", "-sV -sC -T4 --top-ports 1000"
+    )
 
     # 1) Persist scan row (or update existing one queued by the dashboard)
     with session_scope() as s:
@@ -81,10 +85,7 @@ def run_pipeline(
                 target, settings.get("scanner.rustscan_args", "")
             )
         else:
-            services = nmap_scanner.scan(
-                target,
-                settings.get("scanner.nmap_args", "-sV -sC -T4 --top-ports 1000"),
-            )
+            services = nmap_scanner.scan(target, nmap_args)
 
         # 3) CVE mapping
         log.info("[2/5] CVE mapping for %d services", len(services))

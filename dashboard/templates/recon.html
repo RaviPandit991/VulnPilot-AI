@@ -1,317 +1,300 @@
 {% extends "base.html" %}
-{% block title %}Recon · Attack Control Center{% endblock %}
+{% block title %}Recon{% endblock %}
 
 {% block content %}
-<div class="grid grid-cols-1 xl:grid-cols-2 gap-4 h-full" x-data="reconPage()">
+<div class="flex flex-col h-full gap-4" x-data="reconPage()" x-init="init()">
 
   {# ============================================================ #}
-  {#  LEFT - ATTACK CONTROL CENTER                                  #}
+  {#  STEP 1 - SCAN BAR (top, compact)                              #}
   {# ============================================================ #}
-  <section class="panel flex flex-col min-h-0">
-    <div class="panel-header flex items-center justify-between px-4 py-3">
+  <section class="panel">
+    <div class="panel-header px-4 py-3 flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <i data-lucide="crosshair" class="w-4 h-4 text-cyan-400"></i>
-        <h2 class="text-sm font-semibold tracking-wide">ATTACK CONTROL CENTER</h2>
+        <span class="text-cyan-400 font-mono text-xs font-bold">01</span>
+        <i data-lucide="radar" class="w-4 h-4 text-cyan-400"></i>
+        <h2 class="text-sm font-semibold tracking-wide">SCAN</h2>
       </div>
-      <button class="text-slate-500 hover:text-slate-300" @click="resetForm()" title="Reset">
-        <i data-lucide="x" class="w-4 h-4"></i>
-      </button>
+      <div class="text-xs text-slate-500" x-text="scanStatusLabel()"></div>
     </div>
-
-    <!-- Stage tabs -->
-    <div class="flex items-center gap-1 px-3 py-2 overflow-x-auto border-b border-ink-700/60">
-      <template x-for="t in tabs" :key="t.key">
-        <button class="tab" :class="activeTab===t.key && 'active'" @click="activeTab=t.key" x-text="t.label"></button>
-      </template>
-    </div>
-
-    <div class="flex-1 overflow-y-auto p-4 space-y-4">
-      <!-- Configuration block -->
+    <div class="px-4 py-3 grid grid-cols-1 md:grid-cols-[1fr_180px_140px_auto] gap-3 items-end">
       <div>
-        <h3 class="text-[0.65rem] font-bold tracking-[0.15em] text-cyan-400/80 mb-2">CONFIGURATION</h3>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="field-label">Target IP / Domain</label>
-            <input class="field font-mono" x-model="form.target" placeholder="192.168.1.100" />
-          </div>
-          <div>
-            <label class="field-label">Domain</label>
-            <input class="field font-mono" x-model="form.domain" placeholder="example.com" />
-          </div>
-
-          <div>
-            <label class="field-label">Target OS</label>
-            <select class="field" x-model="form.os">
-              <option>Auto-detect</option><option>Linux</option><option>Windows</option>
-              <option>BSD</option><option>macOS</option><option>Network Device</option>
-            </select>
-          </div>
-          <div>
-            <label class="field-label">Port Range</label>
-            <div class="flex items-center gap-2">
-              <input class="field font-mono w-24" x-model="form.portStart" placeholder="1" />
-              <span class="text-slate-500">to</span>
-              <input class="field font-mono w-24" x-model="form.portEnd" placeholder="65535" />
-            </div>
-          </div>
-
-          <div>
-            <label class="field-label">Scan Type</label>
-            <select class="field" x-model="form.scanType">
-              <option value="quick">Quick Scan</option>
-              <option value="intense" selected>Intense Scan</option>
-              <option value="stealth">Stealth Scan</option>
-              <option value="full">Full Scan (-p-)</option>
-            </select>
-          </div>
-          <div>
-            <label class="field-label">Exploit Mode</label>
-            <select class="field" x-model="form.exploitMode">
-              <option value="">Select</option>
-              <option value="safe">Safe (check-only)</option>
-              <option value="audit">Audit</option>
-              <option value="exploit" disabled>Exploit (requires auth)</option>
-            </select>
-          </div>
-
-          <div>
-            <label class="field-label">Payload</label>
-            <select class="field" x-model="form.payload">
-              <option>None</option>
-              <option>Reverse Shell</option>
-              <option>Bind Shell</option>
-              <option>Meterpreter</option>
-            </select>
-          </div>
-          <div>
-            <label class="field-label">Authentication</label>
-            <input class="field" type="password" x-model="form.auth" placeholder="Enter authenticated" />
-          </div>
-
-          <div class="col-span-2">
-            <label class="field-label">Proxy / VPN</label>
-            <select class="field" x-model="form.proxy">
-              <option value="">Select Proxy / VPN</option>
-              <option>SOCKS5 (127.0.0.1:9050)</option>
-              <option>HTTP (127.0.0.1:8080)</option>
-              <option>None (direct)</option>
-            </select>
-          </div>
-
-          <!-- AI Automation toggle -->
-          <div class="col-span-2 flex items-center justify-between bg-ink-800/40 rounded-md px-3 py-2 border border-ink-700/60">
-            <div class="flex items-center gap-2">
-              <i data-lucide="bot" class="w-4 h-4 text-cyan-400"></i>
-              <span class="text-xs font-medium">AI Automation</span>
-              <span class="text-[0.6rem] text-slate-500">rule-pack + LLM hooks</span>
-            </div>
-            <span class="toggle" :class="form.ai && 'on'" @click="form.ai = !form.ai"></span>
-          </div>
-
-          <!-- Attack intensity slider -->
-          <div class="col-span-2">
-            <label class="field-label flex items-center justify-between">
-              <span>Attack Intensity</span>
-              <span class="text-cyan-400 font-mono normal-case tracking-normal" x-text="intensityLabel()"></span>
-            </label>
-            <input type="range" min="1" max="4" step="1" x-model.number="form.intensity" class="cyber w-full" />
-            <div class="flex justify-between text-[0.6rem] text-slate-500 mt-1 font-medium tracking-widest">
-              <span>LEVEL 1</span><span>LEVEL 2</span><span>LEVEL 3</span><span>AI OPTIMISED</span>
-            </div>
-          </div>
-        </div>
+        <label class="field-label">Target IP / hostname</label>
+        <input class="field font-mono" x-model="form.target" placeholder="192.168.75.139"
+               @keydown.enter="startScan()" />
       </div>
-
-      <!-- Command preview -->
       <div>
-        <h3 class="text-[0.65rem] font-bold tracking-[0.15em] text-cyan-400/80 mb-2">COMMAND PREVIEW</h3>
-        <div class="bg-ink-900 border border-ink-700/60 rounded-md px-3 py-2 font-mono text-xs text-cyan-200 break-all">
-          <span x-text="commandPreview()"></span>
-          <span class="cursor"></span>
-        </div>
+        <label class="field-label">Profile</label>
+        <select class="field" x-model="form.scanType">
+          <option value="quick">Quick (top 100 ports)</option>
+          <option value="standard" selected>Standard (top 1000 + version)</option>
+          <option value="deep">Deep (all 65k ports)</option>
+        </select>
       </div>
-
-      <!-- Stats + AI recommendation grid -->
-      <div class="grid grid-cols-2 gap-3">
-        <div class="bg-ink-900/60 border border-ink-700/60 rounded-md p-3">
-          <div class="flex items-center justify-between mb-2">
-            <h4 class="text-[0.65rem] font-bold tracking-[0.15em] text-cyan-400/80">REAL-TIME SCAN STATISTICS</h4>
-            <span class="text-xs text-cyan-300 font-mono" x-text="stats.progress + '%'"></span>
-          </div>
-          <ul class="text-xs space-y-1 text-slate-300">
-            <li>• Scanning ports... <span class="text-slate-500" x-text="stats.portsDone + '/' + stats.portsTotal"></span></li>
-            <li>• Vulnerabilities found: <span class="text-amber-300 font-mono" x-text="stats.vulns"></span></li>
-            <li>• Exploits available: <span class="text-emerald-300 font-mono" x-text="stats.exploits"></span></li>
-          </ul>
-          <div class="mt-2 h-1 bg-ink-800 rounded overflow-hidden">
-            <div class="h-full bg-gradient-to-r from-cyan-400 to-cyan-500 transition-all" :style="`width:${stats.progress}%`"></div>
-          </div>
-        </div>
-
-        <div class="bg-ink-900/60 border border-ink-700/60 rounded-md p-3">
-          <h4 class="text-[0.65rem] font-bold tracking-[0.15em] text-cyan-400/80 mb-2">AI RECOMMENDATIONS</h4>
-          <p class="text-xs text-slate-300 leading-relaxed" x-text="aiRecommendation"></p>
-        </div>
+      <div>
+        <label class="field-label">Operator</label>
+        <input class="field" x-model="form.operator" placeholder="alice@corp" />
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-primary" :disabled="!form.target || running" @click="startScan()">
+          <i data-lucide="play" class="w-3.5 h-3.5"></i> Start
+        </button>
+        <button class="btn btn-ghost" :disabled="!latestScanId" @click="downloadReport()">
+          <i data-lucide="download" class="w-3.5 h-3.5"></i> Report
+        </button>
       </div>
     </div>
-
-    <!-- Action buttons -->
-    <div class="border-t border-ink-700/60 p-3 grid grid-cols-3 sm:grid-cols-6 gap-2">
-      <button class="btn btn-primary col-span-1" @click="startScan()" :disabled="!form.target || running">
-        <i data-lucide="play" class="w-3.5 h-3.5"></i> <span>Start Scan</span>
-      </button>
-      <button class="btn btn-danger col-span-1" @click="stopScan()" :disabled="!running">
-        <i data-lucide="square" class="w-3.5 h-3.5"></i> <span>Stop Scan</span>
-      </button>
-      <button class="btn btn-ghost" disabled title="Disabled by safety policy">
-        <i data-lucide="zap" class="w-3.5 h-3.5"></i> <span>Auto Exploit</span>
-      </button>
-      <button class="btn btn-ghost" @click="smartEnumeration()">
-        <i data-lucide="search-code" class="w-3.5 h-3.5"></i> <span>Smart Enum</span>
-      </button>
-      <button class="btn btn-ghost" @click="generateReport()" :disabled="!latestScanId">
-        <i data-lucide="file-text" class="w-3.5 h-3.5"></i> <span>Report</span>
-      </button>
-      <button class="btn btn-ghost" @click="saveWorkspace()">
-        <i data-lucide="save" class="w-3.5 h-3.5"></i> <span>Save</span>
-      </button>
+    <div class="px-4 pb-3" x-show="running || stats.progress > 0">
+      <div class="h-1 bg-ink-800 rounded overflow-hidden">
+        <div class="h-full bg-gradient-to-r from-cyan-400 to-cyan-500 transition-all"
+             :style="`width:${stats.progress}%`"></div>
+      </div>
     </div>
   </section>
 
   {# ============================================================ #}
-  {#  RIGHT - LIVE LOGS + SCOPE                                     #}
+  {#  STEP 2 + 3 - DISCOVERED  +  SCOPE                             #}
   {# ============================================================ #}
-  <div class="grid grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-4 min-h-0">
+  <div class="grid grid-cols-1 xl:grid-cols-[3fr_2fr] gap-4 flex-1 min-h-0">
 
-    <!-- LIVE ATTACK LOGS -->
+    {# -- DISCOVERED SERVICES -- #}
     <section class="panel flex flex-col min-h-0">
-      <div class="panel-header flex items-center justify-between px-4 py-3">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <i data-lucide="terminal" class="w-4 h-4 text-cyan-400"></i>
-          <h2 class="text-sm font-semibold tracking-wide">LIVE ATTACK LOGS</h2>
+          <span class="text-cyan-400 font-mono text-xs font-bold">02</span>
+          <i data-lucide="list" class="w-4 h-4 text-cyan-400"></i>
+          <h2 class="text-sm font-semibold tracking-wide">DISCOVERED SERVICES</h2>
+          <span class="text-xs text-slate-500"
+                x-text="services.length ? services.length + ' open' : ''"></span>
         </div>
         <div class="flex items-center gap-2">
-          <select class="field !py-1 !text-xs" x-model="logFilter">
-            <option value="">All</option>
-            <option value="success">Success</option>
-            <option value="info">Info</option>
-            <option value="warn">Warning</option>
-            <option value="error">Error</option>
-            <option value="ai">AI</option>
-          </select>
-          <button class="text-slate-400 hover:text-slate-200 p-1 rounded hover:bg-ink-700/40" @click="paused=!paused" :title="paused ? 'Resume' : 'Pause'">
-            <i :data-lucide="paused ? 'play' : 'pause'" class="w-4 h-4"></i>
+          <input class="field !py-1 !text-xs w-48" placeholder="filter port/service..."
+                 x-model="filterText" />
+          <button class="btn btn-ghost !py-1" @click="addAllToScope()"
+                  :disabled="!services.length">
+            <i data-lucide="check-check" class="w-3 h-3"></i> Add All
           </button>
-          <button class="text-slate-400 hover:text-slate-200 p-1 rounded hover:bg-ink-700/40" @click="exportLogs()" title="Export">
-            <i data-lucide="download" class="w-4 h-4"></i>
-          </button>
-          <button class="text-slate-400 hover:text-slate-200 p-1 rounded hover:bg-ink-700/40" @click="searchOpen=!searchOpen" title="Search">
-            <i data-lucide="search" class="w-4 h-4"></i>
+          <button class="btn btn-ghost !py-1" @click="addRiskyToScope()"
+                  :disabled="!services.length"
+                  title="Add services with at least one HIGH/CRITICAL CVE">
+            <i data-lucide="flame" class="w-3 h-3"></i> Add Risky
           </button>
         </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto px-4 py-3 logfeed" x-ref="logBox">
-        <template x-for="(line, i) in filteredLogs()" :key="i">
-          <div class="flex items-start gap-2">
-            <span class="log-time" x-text="line.time"></span>
-            <span class="log-tag" :class="'log-' + line.severity" x-text="'[' + line.severity.toUpperCase() + ']'"></span>
-            <span class="text-slate-200" x-html="line.message"></span>
-          </div>
-        </template>
-        <template x-if="filteredLogs().length === 0">
-          <div class="text-slate-600 text-xs italic py-4">No logs yet. Click <span class="text-cyan-400">Start Scan</span> to begin.</div>
-        </template>
-      </div>
-
-      <div class="border-t border-ink-700/60 px-3 py-2 flex items-center gap-2">
-        <span class="text-cyan-400 font-mono text-xs">$&nbsp;</span>
-        <input class="bg-transparent flex-1 text-xs font-mono outline-none text-slate-200 placeholder-slate-600"
-               placeholder="Type a console command (read-only preview)" x-model="consoleInput"
-               @keydown.enter="echoConsole()" />
+      <div class="flex-1 overflow-y-auto">
+        <table class="w-full text-xs">
+          <thead class="text-slate-500 sticky top-0 bg-ink-900/95 backdrop-blur z-10">
+            <tr class="border-b border-ink-700/60">
+              <th class="text-left py-2 pl-4 pr-2 font-medium w-8"></th>
+              <th class="text-left py-2 px-2 font-medium">Port</th>
+              <th class="text-left py-2 px-2 font-medium">Service</th>
+              <th class="text-left py-2 px-2 font-medium">Product</th>
+              <th class="text-left py-2 px-2 font-medium">Version</th>
+              <th class="text-left py-2 px-2 font-medium">CVEs</th>
+              <th class="text-left py-2 px-2 font-medium">Risk</th>
+              <th class="text-right py-2 pr-4 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="svc in filteredServices()" :key="svc.id">
+              <template x-for="row in [svc]" :key="row.id">
+                <tr class="border-b border-ink-800/60 hover:bg-ink-800/30 transition">
+                  <td class="py-2 pl-4 pr-2">
+                    <input type="checkbox" class="accent-cyan-400 cursor-pointer"
+                           :checked="row.in_scope"
+                           @change="toggleScope(row, $event.target.checked)" />
+                  </td>
+                  <td class="py-2 px-2 font-mono text-cyan-300"
+                      x-text="row.port + '/' + row.protocol"></td>
+                  <td class="py-2 px-2 font-semibold" x-text="row.name"></td>
+                  <td class="py-2 px-2 text-slate-300" x-text="row.product || '—'"></td>
+                  <td class="py-2 px-2 font-mono text-slate-400" x-text="row.version || '—'"></td>
+                  <td class="py-2 px-2">
+                    <span x-show="row.cve_count" class="font-mono text-amber-300"
+                          x-text="row.cve_count"></span>
+                    <span x-show="!row.cve_count" class="text-slate-600">—</span>
+                  </td>
+                  <td class="py-2 px-2">
+                    <span x-show="row.cve_count" class="sev"
+                          :class="'sev-' + row.max_severity"
+                          x-text="row.max_severity.toUpperCase() + ' ' + row.max_cvss.toFixed(1)"></span>
+                    <span x-show="!row.cve_count" class="text-slate-600">—</span>
+                  </td>
+                  <td class="py-2 pr-4 text-right">
+                    <button class="btn btn-ghost !py-1 !px-2"
+                            @click="expanded[row.id] = !expanded[row.id]">
+                      <i data-lucide="chevron-down" class="w-3 h-3"
+                         :class="expanded[row.id] && 'rotate-180'"></i>
+                    </button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="expanded[svc.id]">
+                <td colspan="8" class="bg-ink-900/40 border-b border-ink-800/60">
+                  <div class="px-6 py-3 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <div>
+                      <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-1">Banner</div>
+                      <pre class="font-mono text-slate-300 bg-ink-950/60 border border-ink-700/60 rounded p-2 max-h-32 overflow-auto whitespace-pre-wrap" x-text="svc.banner || '(no banner captured)'"></pre>
+                    </div>
+                    <div>
+                      <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-1">Top CVEs</div>
+                      <template x-for="c in svc.top_cves" :key="c.cve_id">
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="font-mono text-amber-300 w-32 shrink-0" x-text="c.cve_id"></span>
+                          <span class="sev shrink-0" :class="'sev-' + c.severity"
+                                x-text="c.severity.toUpperCase() + ' ' + (c.cvss || 0).toFixed(1)"></span>
+                          <span class="text-slate-400 truncate" x-text="c.summary"></span>
+                        </div>
+                      </template>
+                      <div x-show="!svc.top_cves.length" class="text-slate-600 italic">No CVEs matched.</div>
+                    </div>
+                    <div class="md:col-span-2">
+                      <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-1">Suggested Command</div>
+                      <pre class="font-mono text-cyan-200 bg-ink-950/60 border border-ink-700/60 rounded p-2 whitespace-pre-wrap" x-text="svc.suggested_command"></pre>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
+            <template x-if="!services.length">
+              <tr><td colspan="8" class="py-12 text-center text-slate-600 italic">
+                No services yet. Run a scan above to discover open ports.
+              </td></tr>
+            </template>
+          </tbody>
+        </table>
       </div>
     </section>
 
-    <!-- SCOPE / VULNERABILITIES -->
+    {# -- SCOPE PANEL -- #}
     <section class="panel flex flex-col min-h-0">
-      <div class="panel-header flex items-center justify-between px-4 py-3">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <i data-lucide="bug" class="w-4 h-4 text-cyan-400"></i>
-          <h2 class="text-sm font-semibold tracking-wide">SCOPE</h2>
-          <span class="text-xs text-slate-500" x-text="scope.length ? scope.length + ' findings' : ''"></span>
+          <span class="text-cyan-400 font-mono text-xs font-bold">03</span>
+          <i data-lucide="target" class="w-4 h-4 text-cyan-400"></i>
+          <h2 class="text-sm font-semibold tracking-wide">SCOPE & ACTIONS</h2>
+          <span class="text-xs text-slate-500" x-text="scopeCount() + ' in scope'"></span>
         </div>
-        <div class="flex items-center gap-2">
-          <select class="field !py-1 !text-xs" x-model="scopeRiskFilter">
-            <option value="">Risk: any</option>
-            <option value="critical">Critical</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-          <select class="field !py-1 !text-xs" x-model="scopeAttackFilter">
-            <option value="">Attack Surface: any</option>
-            <option>Network</option><option>Web</option><option>Auth</option>
-          </select>
-        </div>
+        <button class="btn btn-ghost !py-1" :disabled="!scopeCount()" @click="runAllChecks()">
+          <i data-lucide="zap" class="w-3 h-3"></i> Run All Safe Checks
+        </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 content-start">
-        <template x-for="card in filteredScope()" :key="card.cve_id + ':' + card.port">
-          <div class="bg-ink-900/60 border border-ink-700/60 rounded-md p-3 hover:border-cyan-500/40 transition">
-            <div class="flex items-start justify-between gap-2">
-              <div>
-                <div class="text-sm font-semibold text-slate-100 leading-tight" x-text="card.cve_id"></div>
-                <div class="text-xs text-slate-400 mt-0.5" x-text="card.title"></div>
+      <div class="flex-1 overflow-y-auto p-3 space-y-2">
+        <template x-for="svc in scopedServices()" :key="svc.id">
+          <div class="bg-ink-900/60 border border-cyan-500/20 rounded-md hover:border-cyan-500/40 transition">
+            <div class="flex items-center justify-between p-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="font-mono text-cyan-300 shrink-0"
+                      x-text="svc.port + '/' + svc.protocol"></span>
+                <span class="font-semibold shrink-0" x-text="svc.name"></span>
+                <span class="text-xs text-slate-400 truncate"
+                      x-text="(svc.product || '') + ' ' + (svc.version || '')"></span>
               </div>
-              <span class="sev" :class="'sev-' + (card.severity || 'info').toLowerCase()" x-text="(card.severity || 'INFO').toUpperCase()"></span>
-            </div>
-            <div class="flex items-center gap-3 mt-3">
-              <div class="gauge-wrap">
-                <canvas :id="'g_' + (card.cve_id + card.port).replace(/[^a-z0-9]/gi,'_')"></canvas>
-                <div class="gauge-value">
-                  <div class="num" x-text="card.cvss !== null ? card.cvss.toFixed(1) : '—'"></div>
-                  <div class="lbl">CVSS</div>
-                </div>
-              </div>
-              <div class="flex-1 min-w-0">
-                <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-0.5">Target Service</div>
-                <div class="text-xs text-cyan-300 font-mono truncate" x-text="card.service_label"></div>
-                <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mt-2 mb-0.5">Description</div>
-                <div class="text-xs text-slate-300 line-clamp-3" x-text="card.summary || '—'"></div>
+              <div class="flex items-center gap-1 shrink-0">
+                <span x-show="svc.cve_count" class="sev"
+                      :class="'sev-' + svc.max_severity"
+                      x-text="svc.max_severity.toUpperCase()"></span>
+                <button class="text-slate-500 hover:text-red-400 p-1"
+                        @click="toggleScope(svc, false)" title="Remove from scope">
+                  <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                </button>
               </div>
             </div>
-            <div class="border-t border-ink-700/60 mt-3 pt-2 flex flex-wrap items-center justify-between gap-1">
-              <div class="text-[0.65rem] text-slate-500">
-                Recommended: <span class="text-slate-300" x-text="card.recommended_module || 'manual review'"></span>
-              </div>
-              <div class="flex flex-wrap gap-1">
-                <button class="btn !py-1 !px-2 btn-ghost" disabled title="Disabled by safety policy">
-                  <i data-lucide="zap" class="w-3 h-3"></i> Exploit
-                </button>
-                <button class="btn !py-1 !px-2 btn-ghost" @click="showPoc(card)">
-                  <i data-lucide="file-code" class="w-3 h-3"></i> POC
-                </button>
-                <button class="btn !py-1 !px-2 btn-ghost" @click="patchInfo(card)">
-                  <i data-lucide="info" class="w-3 h-3"></i> Patch
-                </button>
-              </div>
+            <div class="px-3 pb-3 flex flex-wrap gap-1.5">
+              <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'check')">
+                <i data-lucide="shield-check" class="w-3 h-3"></i> Safe Check
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'banner')">
+                <i data-lucide="file-text" class="w-3 h-3"></i> Banner
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'command')">
+                <i data-lucide="terminal" class="w-3 h-3"></i> Command
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="showCves(svc)"
+                      :disabled="!svc.cve_count">
+                <i data-lucide="bug" class="w-3 h-3"></i>
+                CVEs <span x-show="svc.cve_count" class="ml-1 text-amber-300"
+                            x-text="'(' + svc.cve_count + ')'"></span>
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="patchInfo(svc)"
+                      :disabled="!svc.top_cves.length">
+                <i data-lucide="external-link" class="w-3 h-3"></i> NVD
+              </button>
+            </div>
+            <div x-show="actionOutput[svc.id]"
+                 class="border-t border-ink-700/60 px-3 py-2 bg-ink-950/40">
+              <pre class="text-xs text-slate-300 font-mono whitespace-pre-wrap"
+                   x-text="actionOutput[svc.id]"></pre>
             </div>
           </div>
         </template>
-        <template x-if="scope.length === 0">
-          <div class="text-slate-600 text-xs italic col-span-full text-center py-12">
-            No findings yet. Run a scan to populate scope.
+        <template x-if="!scopeCount()">
+          <div class="text-slate-600 text-xs italic text-center py-12">
+            Tick a service in the table to add it to scope.
           </div>
         </template>
       </div>
     </section>
   </div>
 
-  {# Floating AI assistant button #}
-  <button class="fixed right-6 bottom-6 w-12 h-12 rounded-full bg-cyan-400 text-ink-950 shadow-glow-cyan hover:scale-105 transition flex items-center justify-center z-20"
-          @click="showAi=!showAi" title="AI Assistant">
-    <i data-lucide="bot" class="w-5 h-5"></i>
-  </button>
+  {# Compact live log strip (collapsible) #}
+  <section class="panel" x-data="{ open: false }">
+    <button class="w-full px-4 py-2 flex items-center justify-between text-xs"
+            @click="open=!open">
+      <div class="flex items-center gap-2">
+        <i data-lucide="terminal" class="w-3.5 h-3.5 text-slate-400"></i>
+        <span class="font-semibold tracking-wide text-slate-300">LIVE LOG</span>
+        <span class="text-slate-500" x-text="logs.length + ' lines'"></span>
+      </div>
+      <i :data-lucide="open ? 'chevron-down' : 'chevron-up'" class="w-3.5 h-3.5"></i>
+    </button>
+    <div x-show="open" class="border-t border-ink-700/60 max-h-48 overflow-y-auto px-4 py-2 logfeed"
+         x-ref="logBox">
+      <template x-for="(line, i) in logs.slice(-100)" :key="i">
+        <div class="flex items-start gap-2">
+          <span class="log-time" x-text="line.time"></span>
+          <span class="log-tag" :class="'log-' + line.severity"
+                x-text="'[' + line.severity.toUpperCase() + ']'"></span>
+          <span class="text-slate-200" x-text="line.message"></span>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  {# CVE modal #}
+  <div x-show="cveModal" x-cloak
+       class="fixed inset-0 bg-black/70 backdrop-blur-sm z-30 flex items-center justify-center p-4"
+       @click.self="cveModal=null">
+    <div class="panel max-w-3xl w-full max-h-[80vh] flex flex-col" x-show="cveModal">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i data-lucide="bug" class="w-4 h-4 text-cyan-400"></i>
+          <h3 class="text-sm font-semibold" x-text="cveModal && (cveModal.port + '/' + cveModal.protocol + ' ' + cveModal.name + ' — ' + cveModal.cve_count + ' CVEs')"></h3>
+        </div>
+        <button class="text-slate-400 hover:text-slate-200" @click="cveModal=null">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div class="overflow-y-auto p-4 space-y-2">
+        <template x-for="c in modalCves" :key="c.cve_id">
+          <div class="bg-ink-900/60 border border-ink-700/60 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+              <a class="font-mono text-amber-300 hover:text-amber-200"
+                 :href="'https://nvd.nist.gov/vuln/detail/' + c.cve_id"
+                 target="_blank" x-text="c.cve_id"></a>
+              <span class="sev" :class="'sev-' + c.severity"
+                    x-text="c.severity.toUpperCase() + ' ' + (c.cvss || 0).toFixed(1)"></span>
+            </div>
+            <div class="text-xs text-slate-300" x-text="c.summary || '—'"></div>
+          </div>
+        </template>
+        <div x-show="!modalCves.length" class="text-slate-600 italic text-center py-8">
+          Loading...
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
