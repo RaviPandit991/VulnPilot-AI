@@ -398,6 +398,34 @@ def create_app() -> Flask:
                 "services": services,
             })
 
+    @app.get("/api/msf/status")
+    def msf_status():
+        """Return whether Metasploit RPC is configured and reachable."""
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return jsonify({
+                "enabled": False,
+                "reachable": False,
+                "message": "metasploit.enabled is false in configs/config.yaml",
+            })
+        host = msf_cfg.get("host", "127.0.0.1")
+        port = int(msf_cfg.get("port", 55553))
+        # Cheap TCP probe rather than a full RPC handshake.
+        import socket
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                pass
+            reachable = True
+            message = f"msfrpcd reachable at {host}:{port}"
+        except OSError as exc:
+            reachable = False
+            message = (f"Cannot reach msfrpcd at {host}:{port}: {exc}. "
+                       "Start it with: msfrpcd -P <password> -S -a 127.0.0.1")
+        return jsonify({
+            "enabled": True, "reachable": reachable,
+            "host": host, "port": port, "message": message,
+        })
+
     @app.post("/api/services/<int:service_id>/scope")
     def toggle_service_scope(service_id: int):
         payload = request.get_json(silent=True) or {}
@@ -459,42 +487,7 @@ def create_app() -> Flask:
                 return jsonify({"action": "note", "note": svc.notes})
 
             if action == "check":
-                msf_cfg = get_settings().section("metasploit")
-                if not msf_cfg.get("enabled"):
-                    return jsonify({
-                        "action": "check",
-                        "status": "skipped",
-                        "output": ("Metasploit RPC is disabled. Set "
-                                   "metasploit.enabled=true in configs/config.yaml "
-                                   "and start msfrpcd to run live checks."),
-                    }), 200
-                module = _recommended_module(svc)
-                if module == "manual review":
-                    return jsonify({
-                        "action": "check",
-                        "status": "skipped",
-                        "output": "No safe auxiliary module is registered for "
-                                  f"service '{svc.name}'. Manual review required.",
-                    })
-                # Persist the run record (will be re-used by exploit_engine
-                # in a future commit; for now we just stub the result).
-                run = ExploitRun(
-                    scan_id=svc.scan_id,
-                    module=module, action="check",
-                    options=str({"RHOSTS": target, "RPORT": svc.port}),
-                    status="queued",
-                    safe_mode=True,
-                    result="(execution not yet wired - record created)",
-                )
-                s.add(run)
-                return jsonify({
-                    "action": "check",
-                    "status": "queued",
-                    "module": module,
-                    "output": (f"Queued safe check: {module} against "
-                               f"{target}:{svc.port}. Live execution requires "
-                               f"msfrpcd running and metasploit.enabled=true."),
-                })
+                return _do_msf_check(s, svc, target)
 
             return jsonify({"error": f"unknown action: {action}"}), 400
 
@@ -709,6 +702,127 @@ def _run_scan_background(scan_id: int, target: str, operator: str, mode: str,
             scan = s.get(Scan, scan_id)
             if scan:
                 scan.status = "error"
+
+
+def _do_msf_check(s, svc, target: str):
+    """Run the recommended Metasploit auxiliary scanner against `svc`.
+
+    Called from the per-service action handler. Blocks the request for up
+    to ~75 seconds; auxiliary scanners typically finish in 5-30s. Persists
+    the resulting ExploitRun row regardless of outcome so operators can
+    audit what was attempted.
+    """
+    from exploit_engine.module_selector import SelectedModule, is_safe
+    from exploit_engine.metasploit_client import (
+        MetasploitClient, MetasploitDisabled,
+    )
+
+    msf_cfg = get_settings().section("metasploit")
+    if not msf_cfg.get("enabled"):
+        return jsonify({
+            "action": "check",
+            "status": "skipped",
+            "output": (
+                "Metasploit RPC is disabled.\n"
+                "1. Start the daemon:\n"
+                "     msfrpcd -P <password> -S -a 127.0.0.1\n"
+                "2. Edit configs/config.yaml -> metasploit.enabled: true\n"
+                "3. Restart the dashboard."
+            ),
+        }), 200
+
+    module_path = _recommended_module(svc)
+    if module_path == "manual review":
+        return jsonify({
+            "action": "check",
+            "status": "skipped",
+            "output": (f"No safe auxiliary module is registered for "
+                       f"service '{svc.name}'. Manual review required."),
+        })
+    if not is_safe(module_path):
+        return jsonify({
+            "action": "check",
+            "status": "blocked",
+            "output": (f"Module {module_path} blocked by safety allowlist."),
+        }), 403
+
+    selection = SelectedModule(
+        module=module_path,
+        action="check",
+        options={"RHOSTS": target, "RPORT": svc.port},
+        target_host=target,
+        target_port=svc.port,
+        rationale="Operator-initiated safe check via dashboard",
+        severity_hint="informational",
+    )
+
+    client = MetasploitClient(
+        host=msf_cfg.get("host", "127.0.0.1"),
+        port=int(msf_cfg.get("port", 55553)),
+        username=msf_cfg.get("username", "msf"),
+        password=msf_cfg.get("password", "msf"),
+        ssl=bool(msf_cfg.get("ssl", False)),
+        enabled=True,
+    )
+
+    # Persist the run record up-front in 'running' state so the audit
+    # trail survives even if the call hangs or crashes.
+    run = ExploitRun(
+        scan_id=svc.scan_id,
+        module=module_path,
+        action="check",
+        options=str(selection.options),
+        status="running",
+        safe_mode=True,
+        result="(in progress)",
+    )
+    s.add(run)
+    s.flush()
+    run_id = run.id
+
+    log.info("MSF check %s -> %s:%s starting (run #%s)",
+             module_path, target, svc.port, run_id)
+
+    try:
+        result = client.run(selection, timeout=60.0)
+    except MetasploitDisabled as exc:
+        run.status = "skipped"
+        run.result = f"MSF disabled: {exc}"
+        return jsonify({
+            "action": "check", "status": "skipped",
+            "output": str(exc),
+        }), 200
+    except Exception as exc:
+        log.exception("MSF check failed")
+        run.status = "error"
+        run.result = f"{type(exc).__name__}: {exc}"
+        return jsonify({
+            "action": "check", "status": "error", "module": module_path,
+            "output": (
+                f"MSF call failed: {exc}\n\n"
+                "Check that msfrpcd is running and the password in "
+                "configs/config.yaml matches what you passed to it.\n"
+                "Verify with: ss -ltnp | grep 55553"
+            ),
+        }), 500
+
+    # Persist final result
+    run.status = result.status
+    run.result = result.output[-4000:] if result.output else ""
+
+    log.info(
+        "MSF check %s finished status=%s in %.1fs",
+        module_path, result.status, result.duration_seconds,
+    )
+
+    return jsonify({
+        "action": "check",
+        "status": result.status,
+        "module": module_path,
+        "duration_seconds": round(result.duration_seconds, 1),
+        "run_id": run_id,
+        "output": (result.output or "(no output captured)")[-3000:],
+    })
 
 
 if __name__ == "__main__":  # pragma: no cover
