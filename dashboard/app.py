@@ -25,9 +25,11 @@ REST API:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -49,20 +51,16 @@ _LOG_BUFFER: list[dict] = []
 _LOG_BUFFER_MAX = 500
 
 
-class _UIBufferHandler:
-    """Logging handler that mirrors records into the in-memory ring buffer."""
-    def __init__(self):
-        import logging
-        self.level = logging.INFO
+class _UIBufferHandler(logging.Handler):
+    """Mirror records into the in-memory ring buffer feeding /api/logs."""
 
-    def handle(self, record):
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover
         try:
             sev = {
                 "DEBUG": "info", "INFO": "info", "WARNING": "warn",
                 "ERROR": "error", "CRITICAL": "error",
             }.get(record.levelname, "info")
             msg = record.getMessage()
-            # Mark AI-engine and decision-engine lines specially.
             if "ai_engine" in record.name or "decision" in record.name:
                 sev = "ai"
             elif "complete" in msg.lower() or "queued" in msg.lower():
@@ -82,14 +80,12 @@ class _UIBufferHandler:
 
 
 def _install_ui_log_handler() -> None:
-    import logging
-    handler = _UIBufferHandler()
-    handler.handle = handler.handle  # bind
-    # Wrap as a real logging.Handler subclass instance
-    class _H(logging.Handler):
-        def emit(self, record):
-            handler.handle(record)
-    logging.getLogger().addHandler(_H())
+    """Idempotently attach the UI buffer handler to the root logger."""
+    root = logging.getLogger()
+    if any(isinstance(h, _UIBufferHandler) for h in root.handlers):
+        return
+    handler = _UIBufferHandler(level=logging.INFO)
+    root.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +115,7 @@ def create_app() -> Flask:
     def scans():
         return render_template("scans.html", active="scans")
 
-    @app.get("/reports")
+    @app.get("/reports", endpoint="reports")
     def reports_page():
         return render_template("reports.html", active="reports")
 
@@ -344,6 +340,29 @@ def create_app() -> Flask:
         if not target.is_file():
             abort(404)
         return send_file(target, as_attachment=True)
+
+    # ----------------- Error handlers -----------------
+    @app.errorhandler(500)
+    def _internal_error(exc):
+        log.exception("500 on %s %s", request.method, request.path)
+        debug = os.environ.get("VULNPILOT_DEBUG_UI") == "1"
+        body = {
+            "error": "internal server error",
+            "path": request.path,
+        }
+        if debug:
+            body["exception"] = repr(exc)
+            body["traceback"] = traceback.format_exc().splitlines()
+        if request.path.startswith("/api/"):
+            return jsonify(body), 500
+        # HTML fallback
+        return (
+            f"<pre style='background:#0f172a;color:#e2e8f0;padding:1rem;"
+            f"font-family:monospace;font-size:12px'>500 on {request.path}\n\n"
+            f"{repr(exc) if debug else 'Set VULNPILOT_DEBUG_UI=1 to see details.'}"
+            f"</pre>",
+            500,
+        )
 
     return app
 
