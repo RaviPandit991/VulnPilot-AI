@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% block title %}Recon{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-full gap-4" x-data="reconPage()" x-init="init()">
+
+  {# ============================================================ #}
+  {#  STEP 1 - SCAN BAR (top, compact)                              #}
+  {# ============================================================ #}
+  <section class="panel">
+    <div class="panel-header px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-cyan-400 font-mono text-xs font-bold">01</span>
+        <i data-lucide="radar" class="w-4 h-4 text-cyan-400"></i>
+        <h2 class="text-sm font-semibold tracking-wide">SCAN</h2>
+      </div>
+      <div class="text-xs text-slate-500" x-text="scanStatusLabel()"></div>
+    </div>
+    <div class="px-4 py-3 grid grid-cols-1 md:grid-cols-[1fr_180px_140px_auto] gap-3 items-end">
+      <div>
+        <label class="field-label">Target IP / hostname</label>
+        <input class="field font-mono" x-model="form.target" placeholder="192.168.75.139"
+               @keydown.enter="startScan()" />
+      </div>
+      <div>
+        <label class="field-label">Profile</label>
+        <select class="field" x-model="form.scanType">
+          <option value="quick">Quick (top 100 ports)</option>
+          <option value="standard" selected>Standard (top 1000 + version)</option>
+          <option value="deep">Deep (all 65k ports)</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label">Operator</label>
+        <input class="field" x-model="form.operator" placeholder="alice@corp" />
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-primary" :disabled="!form.target || running" @click="startScan()">
+          <i data-lucide="play" class="w-3.5 h-3.5"></i> Start
+        </button>
+        <button class="btn btn-ghost" :disabled="!latestScanId" @click="downloadReport()">
+          <i data-lucide="download" class="w-3.5 h-3.5"></i> Report
+        </button>
+      </div>
+    </div>
+    <div class="px-4 pb-3" x-show="running || stats.progress > 0">
+      <div class="h-1 bg-ink-800 rounded overflow-hidden">
+        <div class="h-full bg-gradient-to-r from-cyan-400 to-cyan-500 transition-all"
+             :style="`width:${stats.progress}%`"></div>
+      </div>
+    </div>
+  </section>
+
+  {# ============================================================ #}
+  {#  STEP 2 + 3 - DISCOVERED  +  SCOPE                             #}
+  {# ============================================================ #}
+  <div class="grid grid-cols-1 xl:grid-cols-[3fr_2fr] gap-4 flex-1 min-h-0">
+
+    {# -- DISCOVERED SERVICES -- #}
+    <section class="panel flex flex-col min-h-0">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="text-cyan-400 font-mono text-xs font-bold">02</span>
+          <i data-lucide="list" class="w-4 h-4 text-cyan-400"></i>
+          <h2 class="text-sm font-semibold tracking-wide">DISCOVERED SERVICES</h2>
+          <span class="text-xs text-slate-500"
+                x-text="services.length ? services.length + ' open' : ''"></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <input class="field !py-1 !text-xs w-48" placeholder="filter port/service..."
+                 x-model="filterText" />
+          <button class="btn btn-ghost !py-1" @click="addAllToScope()"
+                  :disabled="!services.length">
+            <i data-lucide="check-check" class="w-3 h-3"></i> Add All
+          </button>
+          <button class="btn btn-ghost !py-1" @click="addRiskyToScope()"
+                  :disabled="!services.length"
+                  title="Add services with at least one HIGH/CRITICAL CVE">
+            <i data-lucide="flame" class="w-3 h-3"></i> Add Risky
+          </button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto">
+        <table class="w-full text-xs">
+          <thead class="text-slate-500 sticky top-0 bg-ink-900/95 backdrop-blur z-10">
+            <tr class="border-b border-ink-700/60">
+              <th class="text-left py-2 pl-4 pr-2 font-medium w-8"></th>
+              <th class="text-left py-2 px-2 font-medium">Port</th>
+              <th class="text-left py-2 px-2 font-medium">Service</th>
+              <th class="text-left py-2 px-2 font-medium">Product</th>
+              <th class="text-left py-2 px-2 font-medium">Version</th>
+              <th class="text-left py-2 px-2 font-medium">CVEs</th>
+              <th class="text-left py-2 px-2 font-medium">Risk</th>
+              <th class="text-right py-2 pr-4 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="svc in filteredServices()" :key="svc.id">
+              <template x-for="row in [svc]" :key="row.id">
+                <tr class="border-b border-ink-800/60 hover:bg-ink-800/30 transition">
+                  <td class="py-2 pl-4 pr-2">
+                    <input type="checkbox" class="accent-cyan-400 cursor-pointer"
+                           :checked="row.in_scope"
+                           @change="toggleScope(row, $event.target.checked)" />
+                  </td>
+                  <td class="py-2 px-2 font-mono text-cyan-300"
+                      x-text="row.port + '/' + row.protocol"></td>
+                  <td class="py-2 px-2 font-semibold" x-text="row.name"></td>
+                  <td class="py-2 px-2 text-slate-300" x-text="row.product || '—'"></td>
+                  <td class="py-2 px-2 font-mono text-slate-400" x-text="row.version || '—'"></td>
+                  <td class="py-2 px-2">
+                    <span x-show="row.cve_count" class="font-mono text-amber-300"
+                          x-text="row.cve_count"></span>
+                    <span x-show="!row.cve_count" class="text-slate-600">—</span>
+                  </td>
+                  <td class="py-2 px-2">
+                    <span x-show="row.cve_count" class="sev"
+                          :class="'sev-' + row.max_severity"
+                          x-text="row.max_severity.toUpperCase() + ' ' + row.max_cvss.toFixed(1)"></span>
+                    <span x-show="!row.cve_count" class="text-slate-600">—</span>
+                  </td>
+                  <td class="py-2 pr-4 text-right">
+                    <button class="btn btn-ghost !py-1 !px-2"
+                            @click="expanded[row.id] = !expanded[row.id]">
+                      <i data-lucide="chevron-down" class="w-3 h-3"
+                         :class="expanded[row.id] && 'rotate-180'"></i>
+                    </button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="expanded[svc.id]">
+                <td colspan="8" class="bg-ink-900/40 border-b border-ink-800/60">
+                  <div class="px-6 py-3 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <div>
+                      <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-1">Banner</div>
+                      <pre class="font-mono text-slate-300 bg-ink-950/60 border border-ink-700/60 rounded p-2 max-h-32 overflow-auto whitespace-pre-wrap" x-text="svc.banner || '(no banner captured)'"></pre>
+                    </div>
+                    <div>
+                      <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-1">Top CVEs</div>
+                      <template x-for="c in svc.top_cves" :key="c.cve_id">
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="font-mono text-amber-300 w-32 shrink-0" x-text="c.cve_id"></span>
+                          <span class="sev shrink-0" :class="'sev-' + c.severity"
+                                x-text="c.severity.toUpperCase() + ' ' + (c.cvss || 0).toFixed(1)"></span>
+                          <span class="text-slate-400 truncate" x-text="c.summary"></span>
+                        </div>
+                      </template>
+                      <div x-show="!svc.top_cves.length" class="text-slate-600 italic">No CVEs matched.</div>
+                    </div>
+                    <div class="md:col-span-2">
+                      <div class="text-[0.65rem] uppercase tracking-wider text-slate-500 mb-1">Suggested Command</div>
+                      <pre class="font-mono text-cyan-200 bg-ink-950/60 border border-ink-700/60 rounded p-2 whitespace-pre-wrap" x-text="svc.suggested_command"></pre>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
+            <template x-if="!services.length">
+              <tr><td colspan="8" class="py-12 text-center text-slate-600 italic">
+                No services yet. Run a scan above to discover open ports.
+              </td></tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    {# -- SCOPE PANEL -- #}
+    <section class="panel flex flex-col min-h-0">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="text-cyan-400 font-mono text-xs font-bold">03</span>
+          <i data-lucide="target" class="w-4 h-4 text-cyan-400"></i>
+          <h2 class="text-sm font-semibold tracking-wide">SCOPE & ACTIONS</h2>
+          <span class="text-xs text-slate-500" x-text="scopeCount() + ' in scope'"></span>
+        </div>
+        <button class="btn btn-ghost !py-1" :disabled="!scopeCount()" @click="runAllChecks()">
+          <i data-lucide="zap" class="w-3 h-3"></i> Run All Safe Checks
+        </button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-3 space-y-2">
+        <template x-for="svc in scopedServices()" :key="svc.id">
+          <div class="bg-ink-900/60 border border-cyan-500/20 rounded-md hover:border-cyan-500/40 transition">
+            <div class="flex items-center justify-between p-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="font-mono text-cyan-300 shrink-0"
+                      x-text="svc.port + '/' + svc.protocol"></span>
+                <span class="font-semibold shrink-0" x-text="svc.name"></span>
+                <span class="text-xs text-slate-400 truncate"
+                      x-text="(svc.product || '') + ' ' + (svc.version || '')"></span>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <span x-show="svc.cve_count" class="sev"
+                      :class="'sev-' + svc.max_severity"
+                      x-text="svc.max_severity.toUpperCase()"></span>
+                <button class="text-slate-500 hover:text-red-400 p-1"
+                        @click="toggleScope(svc, false)" title="Remove from scope">
+                  <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+            </div>
+            <div class="px-3 pb-3 flex flex-wrap gap-1.5">
+              <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'check')">
+                <i data-lucide="shield-check" class="w-3 h-3"></i> Safe Check
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'banner')">
+                <i data-lucide="file-text" class="w-3 h-3"></i> Banner
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="action(svc, 'command')">
+                <i data-lucide="terminal" class="w-3 h-3"></i> Command
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="showCves(svc)"
+                      :disabled="!svc.cve_count">
+                <i data-lucide="bug" class="w-3 h-3"></i>
+                CVEs <span x-show="svc.cve_count" class="ml-1 text-amber-300"
+                            x-text="'(' + svc.cve_count + ')'"></span>
+              </button>
+              <button class="btn btn-ghost !py-1 !px-2" @click="patchInfo(svc)"
+                      :disabled="!svc.top_cves.length">
+                <i data-lucide="external-link" class="w-3 h-3"></i> NVD
+              </button>
+            </div>
+            <div x-show="actionOutput[svc.id]"
+                 class="border-t border-ink-700/60 px-3 py-2 bg-ink-950/40">
+              <pre class="text-xs text-slate-300 font-mono whitespace-pre-wrap"
+                   x-text="actionOutput[svc.id]"></pre>
+            </div>
+          </div>
+        </template>
+        <template x-if="!scopeCount()">
+          <div class="text-slate-600 text-xs italic text-center py-12">
+            Tick a service in the table to add it to scope.
+          </div>
+        </template>
+      </div>
+    </section>
+  </div>
+
+  {# Compact live log strip (collapsible) #}
+  <section class="panel" x-data="{ open: false }">
+    <button class="w-full px-4 py-2 flex items-center justify-between text-xs"
+            @click="open=!open">
+      <div class="flex items-center gap-2">
+        <i data-lucide="terminal" class="w-3.5 h-3.5 text-slate-400"></i>
+        <span class="font-semibold tracking-wide text-slate-300">LIVE LOG</span>
+        <span class="text-slate-500" x-text="logs.length + ' lines'"></span>
+      </div>
+      <i :data-lucide="open ? 'chevron-down' : 'chevron-up'" class="w-3.5 h-3.5"></i>
+    </button>
+    <div x-show="open" class="border-t border-ink-700/60 max-h-48 overflow-y-auto px-4 py-2 logfeed"
+         x-ref="logBox">
+      <template x-for="(line, i) in logs.slice(-100)" :key="i">
+        <div class="flex items-start gap-2">
+          <span class="log-time" x-text="line.time"></span>
+          <span class="log-tag" :class="'log-' + line.severity"
+                x-text="'[' + line.severity.toUpperCase() + ']'"></span>
+          <span class="text-slate-200" x-text="line.message"></span>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  {# CVE modal #}
+  <div x-show="cveModal" x-cloak
+       class="fixed inset-0 bg-black/70 backdrop-blur-sm z-30 flex items-center justify-center p-4"
+       @click.self="cveModal=null">
+    <div class="panel max-w-3xl w-full max-h-[80vh] flex flex-col" x-show="cveModal">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i data-lucide="bug" class="w-4 h-4 text-cyan-400"></i>
+          <h3 class="text-sm font-semibold" x-text="cveModal && (cveModal.port + '/' + cveModal.protocol + ' ' + cveModal.name + ' — ' + cveModal.cve_count + ' CVEs')"></h3>
+        </div>
+        <button class="text-slate-400 hover:text-slate-200" @click="cveModal=null">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div class="overflow-y-auto p-4 space-y-2">
+        <template x-for="c in modalCves" :key="c.cve_id">
+          <div class="bg-ink-900/60 border border-ink-700/60 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+              <a class="font-mono text-amber-300 hover:text-amber-200"
+                 :href="'https://nvd.nist.gov/vuln/detail/' + c.cve_id"
+                 target="_blank" x-text="c.cve_id"></a>
+              <span class="sev" :class="'sev-' + c.severity"
+                    x-text="c.severity.toUpperCase() + ' ' + (c.cvss || 0).toFixed(1)"></span>
+            </div>
+            <div class="text-xs text-slate-300" x-text="c.summary || '—'"></div>
+          </div>
+        </template>
+        <div x-show="!modalCves.length" class="text-slate-600 italic text-center py-8">
+          Loading...
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/recon.js') }}"></script>
+{% endblock %}
