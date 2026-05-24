@@ -39,7 +39,7 @@ from sqlalchemy import desc, func, select
 
 from configs.settings import get_settings
 from database.db import init_db, session_scope
-from database.models import ExploitRun, Scan, Service, Vulnerability
+from database.models import ApplicableModule, ExploitRun, Scan, Service, Vulnerability
 from utils.auth_check import AuthorizationError, require_authorization
 from utils.logger import get_logger
 
@@ -502,14 +502,25 @@ def create_app() -> Flask:
         Optional query string ?scan_id=N decorates each entry with the
         list of services from that scan it could target, so the UI can
         offer 'one-click' presets next to each open port.
+
+        Also merges in auto-discovered `ApplicableModule` rows for the
+        selected scan - those are MSF-vetted modules whose CVE matches
+        a finding in the scan, populated by the Analyze button.
         """
         from exploit_engine.exploit_runner import (
             list_catalog, suggest_for_service,
         )
+        from exploit_engine.auto_discovery import list_for_scan
+
         scan_id_arg = request.args.get("scan_id")
         catalog = list_catalog()
+        # Tag every curated entry so the UI can render a different
+        # badge for curated vs auto-discovered modules.
+        for entry in catalog:
+            entry["source"] = "curated"
 
         scan_services: list[dict] = []
+        auto_entries: list[dict] = []
         with session_scope() as s:
             scan = None
             if scan_id_arg:
@@ -538,13 +549,23 @@ def create_app() -> Flask:
             else:
                 scan_summary = None
 
-        # Annotate each catalog entry with the matching services.
+        # Annotate each curated catalog entry with the matching services.
         for entry in catalog:
             entry["matched_services"] = [
                 svc for svc in scan_services
                 if (svc["name"].lower() in entry["service_names"])
                 or (svc["port"] in entry["ports"])
             ]
+
+        # Merge in auto-discovered modules for the selected scan.
+        # Skip any whose module path is already in the curated catalog
+        # so we don't show the same module twice.
+        if scan is not None:
+            curated_paths = {e["module"] for e in catalog}
+            for ae in list_for_scan(scan.id):
+                if ae["module"] in curated_paths:
+                    continue
+                auto_entries.append(ae)
 
         # Per-service suggestions (UI surfaces these on each row).
         suggestions = []
@@ -559,13 +580,56 @@ def create_app() -> Flask:
 
         msf_cfg = get_settings().section("metasploit")
         return jsonify({
-            "catalog": catalog,
+            "catalog": catalog + auto_entries,
             "scan": scan_summary,
             "services": scan_services,
             "suggestions": suggestions,
+            "auto_count": len(auto_entries),
+            "curated_count": len(catalog),
             "msf_enabled": bool(msf_cfg.get("enabled")),
             "app_mode": get_settings().get("app.mode", "safe"),
         })
+
+    @app.post("/api/exploit/analyze/<int:scan_id>")
+    def api_exploit_analyze(scan_id: int):
+        """On-demand auto-discovery for `scan_id`.
+
+        For every CVE the recon pipeline persisted against the scan,
+        ask msfrpcd which `exploit/*` modules target it, and persist
+        the matches as `ApplicableModule` rows. The Exploit-tab
+        catalog endpoint then merges them into its catalog response.
+
+        Body (optional JSON):
+            confirm_authorized   default false - currently advisory
+                                 because Analyze is read-only (it just
+                                 queries MSF's index, it doesn't run
+                                 anything against the target). The
+                                 standard authorization gate is still
+                                 enforced when the operator clicks Run
+                                 on a discovered module.
+        """
+        from exploit_engine.auto_discovery import discover_for_scan
+
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return jsonify({
+                "error": "msfrpcd disabled",
+                "hint": ("Set metasploit.enabled: true in configs/config.yaml "
+                         "and start msfrpcd before running Analyze."),
+            }), 503
+
+        # Verify the scan exists before kicking off the (potentially
+        # multi-second) MSF queries.
+        with session_scope() as s:
+            scan = s.get(Scan, scan_id)
+            if not scan:
+                return jsonify({"error": f"scan {scan_id} not found"}), 404
+            target = scan.target
+
+        log.info("auto-discovery analyse scan #%s (target=%s)",
+                 scan_id, target)
+        result = discover_for_scan(scan_id, msf_cfg)
+        return jsonify(result.to_dict())
 
     @app.get("/api/exploit/runs")
     def api_exploit_runs():
@@ -616,7 +680,8 @@ def create_app() -> Flask:
         """Launch a curated `exploit/*` module against a target.
 
         Required JSON body fields:
-            module             - msf module path (must be in the catalog)
+            module             - msf module path (must be in the catalog
+                                 OR auto-discovered for the scan)
             rhosts             - target host
             rport              - target port (int)
             confirm_authorized - must be true; the UI exposes this as a
@@ -629,6 +694,7 @@ def create_app() -> Flask:
         from exploit_engine.exploit_runner import (
             ExploitRequest, find_by_module, is_allowed, run_exploit,
         )
+        from exploit_engine.auto_discovery import allowed_modules_for_scan
 
         payload: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
         module = (payload.get("module") or "").strip()
@@ -642,8 +708,25 @@ def create_app() -> Flask:
 
         if not module or not rhosts or rport <= 0:
             return jsonify({"error": "module, rhosts, rport are required"}), 400
-        if not is_allowed(module):
-            return jsonify({"error": f"module not in curated catalog: {module}"}), 403
+
+        # Build the per-scan auto-allowed list. The check passes if the
+        # module is in EXPLOIT_CATALOG (the curated 8) OR if it was
+        # auto-discovered for this scan via the Analyze button.
+        scan_id_for_allow = payload.get("scan_id")
+        extra_allowed: list = []
+        if scan_id_for_allow:
+            try:
+                extra_allowed = allowed_modules_for_scan(int(scan_id_for_allow))
+            except (TypeError, ValueError):
+                extra_allowed = []
+
+        if not is_allowed(module, extra_allowed=extra_allowed):
+            return jsonify({
+                "error": (f"module not in curated catalog and not "
+                          f"auto-discovered for this scan: {module}. "
+                          "Click Analyze on the relevant scan to expand "
+                          "the allowlist with MSF-vetted matches."),
+            }), 403
         if not confirm:
             return jsonify({
                 "error": ("Refusing to run exploit without explicit "
@@ -738,7 +821,7 @@ def create_app() -> Flask:
                  module, "force" if req.force_exploit else "auto",
                  rhosts, rport, run_id)
 
-        result = run_exploit(msf_cfg, req)
+        result = run_exploit(msf_cfg, req, extra_allowed=extra_allowed)
 
         with session_scope() as s:
             row = s.get(ExploitRun, run_id)

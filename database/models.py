@@ -8,9 +8,11 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -96,3 +98,37 @@ class ExploitRun(Base):
     )
 
     scan: Mapped[Scan] = relationship(back_populates="exploit_runs")
+
+
+class ApplicableModule(Base):
+    """Auto-discovered Metasploit `exploit/*` modules whose CVE matches a
+    finding in `scan_id`.
+
+    Populated by `exploit_engine.auto_discovery.discover_for_scan` when
+    the operator clicks the Analyze button on the Exploit tab. Each row
+    represents 'Metasploit thinks this module targets a CVE that recon
+    found in this scan' - the module is therefore added to the runtime
+    allowlist for that scan, so the operator can launch it from the UI
+    without us having to ship every possible module in the curated
+    catalog.
+    """
+    __tablename__ = "applicable_modules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
+    service_id: Mapped[Optional[int]] = mapped_column(ForeignKey("services.id"))
+    module: Mapped[str] = mapped_column(String(255))
+    cve_id: Mapped[Optional[str]] = mapped_column(String(32))
+    source: Mapped[str] = mapped_column(String(16), default="auto")  # auto | manual
+    name: Mapped[Optional[str]] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    rank: Mapped[Optional[str]] = mapped_column(String(32))
+    disclosure_date: Mapped[Optional[str]] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("scan_id", "module",
+                         name="uq_applicable_scan_module"),
+    )
