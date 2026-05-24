@@ -54,12 +54,46 @@ class Authorization:
 
 
 def _is_private(target: str) -> bool:
+    """Return True iff `target` lives in a private/lab network.
+
+    Resolution order:
+      1. If `target` is already an IP literal, check it against
+         _PRIVATE_NETWORKS directly.
+      2. Otherwise treat it as a hostname and try a DNS lookup. If
+         ANY of the resolved A/AAAA records is in a private network,
+         return True - this lets operators target lab hosts by their
+         mDNS name (e.g. `metasploitable.local`).
+      3. If DNS fails (timeout, NXDOMAIN, no network, ...) we fall
+         back to "public" so the operator can opt in via
+         VULNPILOT_ALLOW_PUBLIC=1 if they really mean it.
+    """
+    # Step 1: direct IP literal
     try:
         ip = ipaddress.ip_address(target)
+        return any(ip in net for net in _PRIVATE_NETWORKS)
     except ValueError:
-        # Hostname - cannot determine without DNS; treat as public for safety.
-        return False
-    return any(ip in net for net in _PRIVATE_NETWORKS)
+        pass
+
+    # Step 2: hostname -> DNS lookup. We use getaddrinfo so we cover
+    # both IPv4 and IPv6 in a single call. socket import is local so
+    # this module stays cheap to import even when network is down.
+    import socket
+    try:
+        # AF_UNSPEC + SOCK_STREAM gives one entry per A/AAAA record.
+        infos = socket.getaddrinfo(target, None, socket.AF_UNSPEC,
+                                   socket.SOCK_STREAM)
+    except (socket.gaierror, OSError, UnicodeError):
+        return False  # treat as public on resolution failure
+
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if any(ip in net for net in _PRIVATE_NETWORKS):
+            return True
+    return False
 
 
 def _confirm(prompt: str) -> bool:
