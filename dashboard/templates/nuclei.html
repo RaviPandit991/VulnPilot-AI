@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+{% block title %}Nuclei{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-full gap-4" x-data="nucleiPage()" x-init="init()">
+
+  {# ============================================================ #}
+  {#  STATUS + TARGET + AUTH                                       #}
+  {# ============================================================ #}
+  <section class="panel">
+    <div class="panel-header px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-cyan-400 font-mono text-xs font-bold">01</span>
+        <i data-lucide="scan-search" class="w-4 h-4 text-cyan-400"></i>
+        <h2 class="text-sm font-semibold tracking-wide">NUCLEI CONTROL</h2>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <span :class="status.installed ? 'text-emerald-300' : 'text-red-300'"
+              class="flex items-center gap-1">
+          <i data-lucide="circle"
+             :class="status.installed ? 'text-emerald-400' : 'text-red-400'"
+             class="w-2 h-2 fill-current"></i>
+          <span x-text="status.installed ? 'nuclei ' + (status.version || '?') : 'nuclei not installed'"></span>
+        </span>
+        <span class="text-slate-500" x-show="status.installed"
+              x-text="'· ' + status.template_count + ' templates'"></span>
+      </div>
+    </div>
+
+    {# Install hint when nuclei is missing #}
+    <div x-show="!status.installed" class="px-4 pb-3 -mt-1">
+      <pre class="text-[0.7rem] text-amber-300 whitespace-pre-wrap font-mono leading-relaxed"
+           x-text="status.message"></pre>
+    </div>
+
+    <div class="px-4 py-3 grid grid-cols-1 md:grid-cols-[1.4fr_1fr_1fr_auto] gap-3 items-end border-t border-ink-700/60">
+      <div>
+        <label class="field-label">Target (URL or host)</label>
+        <input class="field font-mono" x-model="form.target"
+               placeholder="http://192.168.75.139" />
+      </div>
+      <div>
+        <label class="field-label">Operator</label>
+        <input class="field" x-model="form.operator" placeholder="alice@corp" />
+      </div>
+      <div>
+        <label class="field-label">Authorization ref</label>
+        <input class="field" x-model="form.authorization_ref"
+               placeholder="ENG-2025-042 / lab" />
+      </div>
+      <label class="flex items-center gap-2 text-xs cursor-pointer select-none pb-2 whitespace-nowrap">
+        <input type="checkbox" class="accent-cyan-400" x-model="form.confirm_authorized" />
+        <span :class="form.confirm_authorized ? 'text-cyan-300' : 'text-slate-400'">
+          I have written authorization
+        </span>
+      </label>
+    </div>
+  </section>
+
+  {# ============================================================ #}
+  {#  PRESETS + SEVERITY + LAUNCH                                  #}
+  {# ============================================================ #}
+  <section class="panel">
+    <div class="panel-header px-4 py-3 flex items-center gap-2">
+      <span class="text-cyan-400 font-mono text-xs font-bold">02</span>
+      <i data-lucide="layers" class="w-4 h-4 text-cyan-400"></i>
+      <h2 class="text-sm font-semibold tracking-wide">TEMPLATES & SEVERITY</h2>
+      <span class="text-xs text-slate-500"
+            x-text="form.presets.length + ' presets · ' + form.severities.length + ' severities'"></span>
+    </div>
+
+    <div class="px-4 py-3 grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4">
+      {# Preset chips #}
+      <div>
+        <label class="field-label !mb-2">Template presets</label>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="p in presets" :key="p.id">
+            <button type="button"
+                    class="border rounded-md px-3 py-2 text-xs flex items-center gap-2 transition"
+                    :class="form.presets.includes(p.id)
+                            ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-300 ring-1 ring-cyan-500/30'
+                            : 'border-ink-700/60 text-slate-300 hover:border-cyan-500/40'"
+                    @click="togglePreset(p.id)">
+              <i :data-lucide="p.icon" class="w-3.5 h-3.5"></i>
+              <div class="text-left">
+                <div class="font-semibold" x-text="p.label"></div>
+                <div class="text-[0.6rem] text-slate-500" x-text="p.description"></div>
+              </div>
+            </button>
+          </template>
+        </div>
+      </div>
+
+      {# Severity checkboxes #}
+      <div>
+        <label class="field-label !mb-2">Severity filter</label>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="sev in allSeverities" :key="sev">
+            <label class="flex items-center gap-1.5 cursor-pointer select-none
+                          border rounded-md px-2.5 py-1.5 text-xs"
+                   :class="form.severities.includes(sev)
+                           ? 'border-cyan-500/60 bg-cyan-500/10'
+                           : 'border-ink-700/60'">
+              <input type="checkbox" class="accent-cyan-400"
+                     :checked="form.severities.includes(sev)"
+                     @change="toggleSeverity(sev)" />
+              <span class="sev" :class="'sev-' + severitySev(sev)"
+                    x-text="sev.toUpperCase()"></span>
+            </label>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <div class="px-4 py-3 border-t border-ink-700/60 flex items-center gap-2 flex-wrap">
+      <button class="btn btn-primary"
+              :disabled="!canRun()"
+              @click="runScan()">
+        <i data-lucide="play" class="w-3.5 h-3.5"></i>
+        <span x-text="running ? 'Scanning...' : 'Launch Nuclei Scan'"></span>
+      </button>
+      <span x-show="!canRun() && !running"
+            class="text-[0.65rem] text-slate-500 italic"
+            x-text="blockReason()"></span>
+      <span x-show="running" class="text-[0.65rem] text-cyan-300 italic">
+        nuclei runs synchronously - this may take 30-180s depending on target/templates...
+      </span>
+      <span class="ml-auto text-xs text-slate-500" x-show="lastRun">
+        last run #<span x-text="lastRun.run_id"></span> ·
+        <span x-text="lastRun.duration_seconds"></span>s ·
+        <span x-text="lastRun.findings.length"></span> findings
+      </span>
+    </div>
+  </section>
+
+  {# ============================================================ #}
+  {#  FINDINGS                                                     #}
+  {# ============================================================ #}
+  <section class="panel flex flex-col flex-1 min-h-0">
+    <div class="panel-header px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-cyan-400 font-mono text-xs font-bold">03</span>
+        <i data-lucide="list-checks" class="w-4 h-4 text-cyan-400"></i>
+        <h2 class="text-sm font-semibold tracking-wide">FINDINGS</h2>
+        <span class="text-xs text-slate-500"
+              x-text="lastRun ? lastRun.findings.length + ' total' : 'no scan yet'"></span>
+      </div>
+      <div class="flex items-center gap-2 text-[0.65rem]" x-show="lastRun">
+        <template x-for="(n, sev) in (lastRun && lastRun.severity_counts) || {}" :key="sev">
+          <span x-show="n > 0" class="sev"
+                :class="'sev-' + severitySev(sev)"
+                x-text="sev.toUpperCase() + ' ' + n"></span>
+        </template>
+      </div>
+    </div>
+
+    <div class="flex-1 overflow-y-auto p-3">
+
+      {# Empty / running / error states #}
+      <template x-if="!lastRun && !running">
+        <div class="text-slate-600 text-xs italic text-center py-12">
+          Configure target + presets above, then launch a scan.
+        </div>
+      </template>
+
+      <template x-if="running">
+        <div class="text-cyan-300 text-xs italic text-center py-12 flex items-center justify-center gap-2">
+          <i data-lucide="loader" class="w-4 h-4 animate-spin"></i>
+          Running nuclei against
+          <span class="font-mono" x-text="form.target"></span>...
+        </div>
+      </template>
+
+      <template x-if="lastRun && lastRun.error">
+        <div class="text-red-300 text-xs p-3 bg-red-500/10 border border-red-500/30 rounded">
+          <div class="font-semibold mb-1">Scan failed</div>
+          <pre class="font-mono text-[0.7rem] whitespace-pre-wrap"
+               x-text="lastRun.error"></pre>
+          <div x-show="lastRun.stderr_excerpt" class="mt-2 text-amber-300">
+            <div class="text-[0.6rem] uppercase tracking-wider mb-1">stderr</div>
+            <pre class="font-mono text-[0.65rem] whitespace-pre-wrap"
+                 x-text="lastRun.stderr_excerpt"></pre>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="lastRun && !lastRun.error && !lastRun.findings.length">
+        <div class="text-slate-600 text-xs italic text-center py-12">
+          Scan completed in <span x-text="lastRun.duration_seconds"></span>s,
+          but no findings matched the selected severity filter.
+          <div class="mt-2">
+            <span x-show="lastRun.return_code !== 0" class="text-amber-300">
+              (nuclei exited non-zero - check stderr in run history)
+            </span>
+          </div>
+        </div>
+      </template>
+
+      <div x-show="lastRun && lastRun.findings && lastRun.findings.length"
+           class="space-y-2">
+        <template x-for="(f, idx) in (lastRun && lastRun.findings) || []" :key="idx">
+          <div class="border border-ink-700/60 rounded-md p-3 bg-ink-900/60 hover:border-cyan-500/40 transition"
+               x-data="{open: false}">
+            <div class="flex items-start justify-between gap-2 cursor-pointer"
+                 @click="open = !open">
+              <div class="flex items-start gap-3 min-w-0 flex-1">
+                <span class="sev shrink-0" :class="'sev-' + severitySev(f.severity)"
+                      x-text="f.severity.toUpperCase()"></span>
+                <div class="min-w-0 flex-1">
+                  <div class="font-semibold text-sm" x-text="f.name"></div>
+                  <div class="font-mono text-[0.65rem] text-cyan-300/70 mt-0.5"
+                       x-text="f.template_id"></div>
+                  <div class="font-mono text-[0.65rem] text-slate-400 mt-1 truncate"
+                       x-text="f.matched_at"></div>
+                </div>
+              </div>
+              <div class="text-right shrink-0">
+                <i :data-lucide="open ? 'chevron-up' : 'chevron-down'"
+                   class="w-4 h-4 text-slate-500"></i>
+              </div>
+            </div>
+
+            <div x-show="open" class="mt-3 pt-3 border-t border-ink-700/60 space-y-2 text-xs">
+              <div x-show="f.info && f.info.description">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">Description</div>
+                <div class="text-slate-300" x-text="f.info && f.info.description"></div>
+              </div>
+              <div x-show="f.info && f.info.tags">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">Tags</div>
+                <div class="font-mono text-amber-300" x-text="f.info && f.info.tags"></div>
+              </div>
+              <div x-show="f.info && f.info.reference && f.info.reference.length">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">References</div>
+                <template x-for="ref in (f.info && f.info.reference) || []" :key="ref">
+                  <a :href="ref" target="_blank" rel="noopener noreferrer"
+                     class="block font-mono text-[0.65rem] text-cyan-400 hover:underline truncate"
+                     x-text="ref"></a>
+                </template>
+              </div>
+              <div x-show="f.extracted && f.extracted.length">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">Extracted</div>
+                <ul class="font-mono text-[0.7rem] text-emerald-300 list-disc list-inside">
+                  <template x-for="ex in f.extracted" :key="ex">
+                    <li x-text="ex"></li>
+                  </template>
+                </ul>
+              </div>
+              <div x-show="f.request">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">Request that triggered the match</div>
+                <pre class="font-mono text-[0.65rem] text-slate-200 bg-ink-950/40 p-2 max-h-40 overflow-auto whitespace-pre-wrap"
+                     x-text="f.request"></pre>
+              </div>
+              <div x-show="f.response">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">Response excerpt</div>
+                <pre class="font-mono text-[0.65rem] text-slate-200 bg-ink-950/40 p-2 max-h-40 overflow-auto whitespace-pre-wrap"
+                     x-text="f.response"></pre>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </section>
+
+  {# ============================================================ #}
+  {#  HISTORY                                                      #}
+  {# ============================================================ #}
+  <section class="panel" x-data="{ open: false }">
+    <button class="w-full px-4 py-3 flex items-center justify-between text-xs"
+            @click="open = !open">
+      <div class="flex items-center gap-2">
+        <i data-lucide="history" class="w-3.5 h-3.5 text-cyan-400"></i>
+        <span class="font-semibold tracking-wide text-slate-300">SCAN HISTORY</span>
+        <span class="text-slate-500" x-text="history.length + ' runs'"></span>
+      </div>
+      <i :data-lucide="open ? 'chevron-down' : 'chevron-up'" class="w-3.5 h-3.5"></i>
+    </button>
+    <div x-show="open" class="border-t border-ink-700/60 max-h-56 overflow-y-auto">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 sticky top-0 bg-ink-900/95 backdrop-blur">
+          <tr class="border-b border-ink-700/60">
+            <th class="text-left py-2 pl-4 pr-2 font-medium">#</th>
+            <th class="text-left py-2 px-2 font-medium">Module</th>
+            <th class="text-left py-2 px-2 font-medium">Options</th>
+            <th class="text-left py-2 px-2 font-medium">Status</th>
+            <th class="text-left py-2 pr-4 font-medium">When</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="row in history" :key="row.id">
+            <tr class="border-b border-ink-800/60 hover:bg-ink-800/30 cursor-pointer transition"
+                @click="loadRun(row.id)">
+              <td class="py-2 pl-4 pr-2 font-mono text-slate-400" x-text="'#' + row.id"></td>
+              <td class="py-2 px-2 font-mono text-cyan-300 truncate max-w-[14rem]"
+                  x-text="row.module"></td>
+              <td class="py-2 px-2 font-mono text-slate-400 truncate max-w-[26rem]"
+                  x-text="row.options || '—'"></td>
+              <td class="py-2 px-2">
+                <span class="sev"
+                      :class="'sev-' + (row.status === 'completed' ? 'low' : 'high')"
+                      x-text="(row.status || '').toUpperCase()"></span>
+              </td>
+              <td class="py-2 pr-4 font-mono text-slate-500"
+                  x-text="(row.created_at || '').slice(0,19).replace('T',' ')"></td>
+            </tr>
+          </template>
+          <template x-if="!history.length">
+            <tr><td colspan="5" class="py-8 text-center text-slate-600 italic">
+              No nuclei runs yet.
+            </td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/nuclei.js') }}"></script>
+{% endblock %}

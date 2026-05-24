@@ -158,6 +158,11 @@ def create_app() -> Flask:
         # Real Sessions tab. Hydrates client-side via /api/sessions/*.
         return render_template("sessions.html", active="sessions")
 
+    @app.get("/nuclei")
+    def nuclei():
+        # Nuclei tab. Hydrates client-side via /api/nuclei/*.
+        return render_template("nuclei.html", active="nuclei")
+
     @app.get("/ai")
     def ai_assistant():
         return render_template(
@@ -951,6 +956,206 @@ def create_app() -> Flask:
 
         log.info("session %s kill -> %s", sid, "ok" if ok else "failed")
         return jsonify({"sid": sid, "killed": bool(ok)})
+
+    # ----------------- REST: nuclei tab -----------------
+    # Nuclei is a probe-only template scanner; it does NOT need the
+    # exploit env-var gate (VULNPILOT_ALLOW_EXPLOIT). It still requires
+    # `confirm_authorized` and runs through `require_authorization`
+    # under mode='audit' so it shares the operator-acknowledgement
+    # contract used by the scan endpoint.
+
+    @app.get("/api/nuclei/status")
+    def api_nuclei_status():
+        from exploit_engine.nuclei_runner import nuclei_status
+        return jsonify(nuclei_status())
+
+    @app.get("/api/nuclei/presets")
+    def api_nuclei_presets():
+        from exploit_engine.nuclei_runner import list_template_presets
+        return jsonify(list_template_presets())
+
+    @app.get("/api/nuclei/runs")
+    def api_nuclei_runs():
+        """Recent nuclei runs (filter ExploitRun where module starts with 'nuclei/')."""
+        try:
+            limit = max(1, min(int(request.args.get("limit", 30)), 100))
+        except ValueError:
+            limit = 30
+        with session_scope() as s:
+            rows = s.execute(
+                select(ExploitRun)
+                .where(ExploitRun.module.like("nuclei/%"))
+                .order_by(desc(ExploitRun.id))
+                .limit(limit)
+            ).scalars().all()
+            return jsonify([
+                {
+                    "id":           r.id,
+                    "scan_id":      r.scan_id,
+                    "module":       r.module,
+                    "action":       r.action,
+                    "status":       r.status,
+                    "options":      r.options,
+                    "created_at":   r.created_at.isoformat() if r.created_at else None,
+                    "result_excerpt": (r.result or "")[:280],
+                }
+                for r in rows
+            ])
+
+    @app.get("/api/nuclei/runs/<int:run_id>")
+    def api_nuclei_run_detail(run_id: int):
+        with session_scope() as s:
+            r = s.get(ExploitRun, run_id)
+            if not r or not (r.module or "").startswith("nuclei/"):
+                return jsonify({"error": "not found"}), 404
+            return jsonify({
+                "id":         r.id,
+                "scan_id":    r.scan_id,
+                "module":     r.module,
+                "action":     r.action,
+                "status":     r.status,
+                "options":    r.options,
+                "result":     r.result or "",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            })
+
+    @app.post("/api/nuclei/scan")
+    def api_nuclei_scan():
+        """Run a nuclei scan against `target`.
+
+        Body fields:
+            target              (required) - URL or host
+            presets             list of preset ids (default: ['cves'])
+            severities          list of nuclei severity levels
+                                (default: ['critical', 'high'])
+            confirm_authorized  must be true
+            authorization_ref   free-text audit reference
+            operator            free-text operator id
+            timeout             wall-clock seconds (default 180, max 600)
+            max_findings        cap on returned findings (default 500)
+        """
+        from exploit_engine.nuclei_runner import (
+            NucleiRequest, run_nuclei_scan, sort_findings,
+        )
+
+        payload: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+        target = (payload.get("target") or "").strip()
+        confirm = bool(payload.get("confirm_authorized"))
+        operator = payload.get("operator") or "web-user"
+        presets = payload.get("presets") or ["cves"]
+        severities = payload.get("severities") or ["critical", "high"]
+
+        if not target:
+            return jsonify({"error": "target is required"}), 400
+        if not confirm:
+            return jsonify({
+                "error": ("Refusing to run scan without explicit "
+                          "authorization. Tick the auth box."),
+            }), 403
+
+        try:
+            require_authorization(
+                target, operator=operator, mode="audit",
+                non_interactive=True,
+                written_auth_ref=payload.get("authorization_ref") or "ui-nuclei",
+            )
+        except AuthorizationError as exc:
+            return jsonify({"error": str(exc)}), 403
+
+        try:
+            timeout = max(10.0, min(float(payload.get("timeout") or 180.0), 600.0))
+        except (TypeError, ValueError):
+            timeout = 180.0
+        try:
+            max_findings = max(10, min(int(payload.get("max_findings") or 500), 2000))
+        except (TypeError, ValueError):
+            max_findings = 500
+
+        req = NucleiRequest(
+            target=target,
+            preset_ids=list(presets),
+            severities=list(severities),
+            timeout=timeout,
+            max_findings=max_findings,
+        )
+
+        # Resolve a Scan row for FK satisfaction (reuse latest, else
+        # create a synthetic placeholder).
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if scan is None:
+                scan = Scan(
+                    target=target, operator=operator, mode="audit",
+                    status="adhoc-nuclei",
+                )
+                s.add(scan); s.flush()
+            scan_id = scan.id
+
+        # Persist a 'running' audit row so the trail survives crashes.
+        with session_scope() as s:
+            run = ExploitRun(
+                scan_id=scan_id,
+                module=f"nuclei/{','.join(req.preset_ids) or 'default'}",
+                action="nuclei_scan",
+                options=str({
+                    "target":     target,
+                    "presets":    req.preset_ids,
+                    "severities": req.severities,
+                    "timeout":    timeout,
+                })[:500],
+                status="running",
+                safe_mode=True,
+                result="(in progress)",
+            )
+            s.add(run); s.flush()
+            run_id = run.id
+
+        log.info("nuclei scan starting (run #%s) target=%s presets=%s",
+                 run_id, target, req.preset_ids)
+
+        result = run_nuclei_scan(req)
+        result.findings = sort_findings(result.findings)
+
+        # Build a compact text summary for the audit row.
+        counts = result.severity_counts()
+        summary_lines = [
+            f"target={target}",
+            f"presets={','.join(req.preset_ids) or '(default)'}",
+            f"severities={','.join(req.severities)}",
+            f"duration={result.duration_seconds:.1f}s",
+            f"return_code={result.return_code}",
+            f"findings={len(result.findings)} "
+            f"(crit={counts['critical']}, high={counts['high']}, "
+            f"med={counts['medium']}, low={counts['low']}, info={counts['info']})",
+        ]
+        if result.truncated:
+            summary_lines.append("[truncated]")
+        if result.error:
+            summary_lines.append(f"error={result.error}")
+        for f in result.findings[:50]:
+            summary_lines.append(
+                f"  [{f.severity}] {f.template_id}  ->  {f.matched_at}"
+            )
+        summary = "\n".join(summary_lines)
+
+        with session_scope() as s:
+            row = s.get(ExploitRun, run_id)
+            if row is not None:
+                if result.error:
+                    row.status = "error"
+                elif result.return_code != 0 and not result.findings:
+                    row.status = "error"
+                else:
+                    row.status = "completed"
+                row.result = summary[-4000:]
+
+        log.info("nuclei scan #%s finished status=%s findings=%d in %.1fs",
+                 run_id, ("error" if result.error else "completed"),
+                 len(result.findings), result.duration_seconds)
+
+        return jsonify({"run_id": run_id, **result.to_dict()})
 
     # ----------------- Error handlers -----------------
     @app.errorhandler(500)
