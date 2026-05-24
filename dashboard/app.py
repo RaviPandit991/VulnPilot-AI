@@ -155,12 +155,8 @@ def create_app() -> Flask:
 
     @app.get("/sessions")
     def sessions():
-        return render_template(
-            "_simple_page.html", active="sessions",
-            page_title="Sessions", icon="terminal",
-            description=("Active Metasploit sessions and console output. "
-                         "Read-only - VulnPilot does not stage payloads."),
-        )
+        # Real Sessions tab. Hydrates client-side via /api/sessions/*.
+        return render_template("sessions.html", active="sessions")
 
     @app.get("/ai")
     def ai_assistant():
@@ -758,6 +754,203 @@ def create_app() -> Flask:
             "output": result.output,
             "error": result.error,
         })
+
+    # ----------------- REST: sessions tab -----------------
+    # The Sessions tab drives existing live sessions held by msfrpcd.
+    # Every command is persisted to ExploitRun (action='session_exec')
+    # for the audit trail.
+
+    def _session_manager_or_503():
+        """Build a SessionManager from current settings, or return a JSON
+        error response tuple if msfrpcd is disabled."""
+        from exploit_engine.session_manager import SessionManager
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return None, (jsonify({
+                "error": "msfrpcd disabled",
+                "hint": ("Set metasploit.enabled: true in configs/config.yaml "
+                         "and start msfrpcd."),
+            }), 503)
+        return SessionManager(msf_cfg), None
+
+    @app.get("/api/sessions/quick-actions")
+    def api_sessions_quick_actions():
+        """Static catalog of quick-action buttons the UI offers."""
+        from exploit_engine.session_manager import list_quick_actions
+        return jsonify(list_quick_actions())
+
+    @app.get("/api/sessions")
+    def api_sessions_list():
+        """List live sessions held by msfrpcd."""
+        from exploit_engine.session_manager import SessionManagerError
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+        try:
+            sessions_live = mgr.list_sessions()
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+        return jsonify({
+            "msf_enabled": True,
+            "sessions": [s.to_dict() for s in sessions_live],
+        })
+
+    @app.get("/api/sessions/<sid>")
+    def api_session_detail(sid: str):
+        from exploit_engine.session_manager import SessionManagerError
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+        try:
+            info = mgr.info(sid)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+        if not info:
+            return jsonify({"error": "session not found"}), 404
+        return jsonify(info.to_dict())
+
+    @app.post("/api/sessions/<sid>/exec")
+    def api_session_exec(sid: str):
+        """Run a single operator-provided command on a session.
+
+        Required JSON body:
+            command            - shell line to send
+            confirm_authorized - must be true (UI surfaces this as a
+                                 sticky checkbox)
+        """
+        from exploit_engine.session_manager import SessionManagerError
+
+        payload = request.get_json(silent=True) or {}
+        cmd = (payload.get("command") or "").strip()
+        confirm = bool(payload.get("confirm_authorized"))
+        timeout = float(payload.get("timeout") or 8.0)
+        if not confirm:
+            return jsonify({
+                "error": ("Refusing to run command without explicit "
+                          "authorization. Tick the auth box in the "
+                          "Sessions tab."),
+            }), 403
+        if not cmd:
+            return jsonify({"error": "command is required"}), 400
+
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+
+        try:
+            result = mgr.execute(sid, cmd, timeout=timeout)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        # Audit: persist the command + output as an ExploitRun row so
+        # everything attempted on a session is reviewable later.
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if scan is None:
+                # Synthetic scan placeholder so the FK stays satisfied.
+                scan = Scan(
+                    target=f"session-{sid}", operator="web-user",
+                    mode="exploit", status="adhoc-session",
+                )
+                s.add(scan); s.flush()
+            audit = ExploitRun(
+                scan_id=scan.id,
+                module=f"session/{sid}",
+                action="session_exec",
+                options=cmd[:500],
+                status="error" if result.error else "completed",
+                safe_mode=False,
+                result=(result.output or "")[-4000:] + (
+                    f"\n[error] {result.error}" if result.error else ""
+                ),
+            )
+            s.add(audit); s.flush()
+            run_id = audit.id
+
+        log.info("session %s exec %r -> %d bytes (run #%s)",
+                 sid, cmd[:60], len(result.output or ""), run_id)
+        return jsonify({**result.to_dict(), "run_id": run_id})
+
+    @app.post("/api/sessions/<sid>/quick/<action>")
+    def api_session_quick(sid: str, action: str):
+        """Run a preset recipe of read-only commands (whoami, hashdump...).
+
+        Preset recipes do not need `confirm_authorized` because they
+        are limited to enumerated read-only commands defined in
+        QUICK_ACTIONS in session_manager.
+        """
+        from exploit_engine.session_manager import SessionManagerError
+
+        timeout = float((request.get_json(silent=True) or {}).get("timeout") or 8.0)
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+
+        try:
+            results = mgr.quick_action(sid, action, timeout=timeout)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        # One audit row covering the whole recipe.
+        joined = "\n".join(
+            f"$ {r.command}\n{r.output}".rstrip() for r in results
+        )
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if scan is None:
+                scan = Scan(
+                    target=f"session-{sid}", operator="web-user",
+                    mode="exploit", status="adhoc-session",
+                )
+                s.add(scan); s.flush()
+            audit = ExploitRun(
+                scan_id=scan.id,
+                module=f"session/{sid}",
+                action=f"session_quick:{action}",
+                options=str([r.command for r in results])[:500],
+                status="completed",
+                safe_mode=True,
+                result=joined[-4000:],
+            )
+            s.add(audit); s.flush()
+            run_id = audit.id
+
+        log.info("session %s quick=%s ran %d cmds (run #%s)",
+                 sid, action, len(results), run_id)
+        return jsonify({
+            "sid": sid, "action": action, "run_id": run_id,
+            "results": [r.to_dict() for r in results],
+        })
+
+    @app.post("/api/sessions/<sid>/kill")
+    def api_session_kill(sid: str):
+        """Terminate a session.
+
+        Required body: {confirm_authorized: true}
+        """
+        from exploit_engine.session_manager import SessionManagerError
+
+        payload = request.get_json(silent=True) or {}
+        if not bool(payload.get("confirm_authorized")):
+            return jsonify({
+                "error": "Refusing to kill session without authorization.",
+            }), 403
+
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+
+        try:
+            ok = mgr.kill(sid)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        log.info("session %s kill -> %s", sid, "ok" if ok else "failed")
+        return jsonify({"sid": sid, "killed": bool(ok)})
 
     # ----------------- Error handlers -----------------
     @app.errorhandler(500)
