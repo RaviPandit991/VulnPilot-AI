@@ -18,6 +18,14 @@ metasploit:
   ssl: false
   enabled: false        # require explicit opt-in
 
+safety:
+  # Lab mode skips the VULNPILOT_ALLOW_EXPLOIT and VULNPILOT_AUTHORIZED
+  # environment-variable gates in utils/auth_check.py. ONLY enable this
+  # on a controlled lab machine that targets vulnerable VMs you own
+  # (Metasploitable, HackTheBox, lab CTF). Public-target and private-
+  # network checks remain active even when lab_mode is true.
+  lab_mode: false
+
 ai:
   use_local_llm: false
   llm_model: ""         # e.g. "mistralai/Mistral-7B-Instruct-v0.2"
