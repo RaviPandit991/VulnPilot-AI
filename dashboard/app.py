@@ -155,12 +155,13 @@ def create_app() -> Flask:
 
     @app.get("/sessions")
     def sessions():
-        return render_template(
-            "_simple_page.html", active="sessions",
-            page_title="Sessions", icon="terminal",
-            description=("Active Metasploit sessions and console output. "
-                         "Read-only - VulnPilot does not stage payloads."),
-        )
+        # Real Sessions tab. Hydrates client-side via /api/sessions/*.
+        return render_template("sessions.html", active="sessions")
+
+    @app.get("/nuclei")
+    def nuclei():
+        # Nuclei tab. Hydrates client-side via /api/nuclei/*.
+        return render_template("nuclei.html", active="nuclei")
 
     @app.get("/ai")
     def ai_assistant():
@@ -758,6 +759,403 @@ def create_app() -> Flask:
             "output": result.output,
             "error": result.error,
         })
+
+    # ----------------- REST: sessions tab -----------------
+    # The Sessions tab drives existing live sessions held by msfrpcd.
+    # Every command is persisted to ExploitRun (action='session_exec')
+    # for the audit trail.
+
+    def _session_manager_or_503():
+        """Build a SessionManager from current settings, or return a JSON
+        error response tuple if msfrpcd is disabled."""
+        from exploit_engine.session_manager import SessionManager
+        msf_cfg = get_settings().section("metasploit")
+        if not msf_cfg.get("enabled"):
+            return None, (jsonify({
+                "error": "msfrpcd disabled",
+                "hint": ("Set metasploit.enabled: true in configs/config.yaml "
+                         "and start msfrpcd."),
+            }), 503)
+        return SessionManager(msf_cfg), None
+
+    @app.get("/api/sessions/quick-actions")
+    def api_sessions_quick_actions():
+        """Static catalog of quick-action buttons the UI offers."""
+        from exploit_engine.session_manager import list_quick_actions
+        return jsonify(list_quick_actions())
+
+    @app.get("/api/sessions")
+    def api_sessions_list():
+        """List live sessions held by msfrpcd."""
+        from exploit_engine.session_manager import SessionManagerError
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+        try:
+            sessions_live = mgr.list_sessions()
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+        return jsonify({
+            "msf_enabled": True,
+            "sessions": [s.to_dict() for s in sessions_live],
+        })
+
+    @app.get("/api/sessions/<sid>")
+    def api_session_detail(sid: str):
+        from exploit_engine.session_manager import SessionManagerError
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+        try:
+            info = mgr.info(sid)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+        if not info:
+            return jsonify({"error": "session not found"}), 404
+        return jsonify(info.to_dict())
+
+    @app.post("/api/sessions/<sid>/exec")
+    def api_session_exec(sid: str):
+        """Run a single operator-provided command on a session.
+
+        Required JSON body:
+            command            - shell line to send
+            confirm_authorized - must be true (UI surfaces this as a
+                                 sticky checkbox)
+        """
+        from exploit_engine.session_manager import SessionManagerError
+
+        payload = request.get_json(silent=True) or {}
+        cmd = (payload.get("command") or "").strip()
+        confirm = bool(payload.get("confirm_authorized"))
+        timeout = float(payload.get("timeout") or 8.0)
+        if not confirm:
+            return jsonify({
+                "error": ("Refusing to run command without explicit "
+                          "authorization. Tick the auth box in the "
+                          "Sessions tab."),
+            }), 403
+        if not cmd:
+            return jsonify({"error": "command is required"}), 400
+
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+
+        try:
+            result = mgr.execute(sid, cmd, timeout=timeout)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        # Audit: persist the command + output as an ExploitRun row so
+        # everything attempted on a session is reviewable later.
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if scan is None:
+                # Synthetic scan placeholder so the FK stays satisfied.
+                scan = Scan(
+                    target=f"session-{sid}", operator="web-user",
+                    mode="exploit", status="adhoc-session",
+                )
+                s.add(scan); s.flush()
+            audit = ExploitRun(
+                scan_id=scan.id,
+                module=f"session/{sid}",
+                action="session_exec",
+                options=cmd[:500],
+                status="error" if result.error else "completed",
+                safe_mode=False,
+                result=(result.output or "")[-4000:] + (
+                    f"\n[error] {result.error}" if result.error else ""
+                ),
+            )
+            s.add(audit); s.flush()
+            run_id = audit.id
+
+        log.info("session %s exec %r -> %d bytes (run #%s)",
+                 sid, cmd[:60], len(result.output or ""), run_id)
+        return jsonify({**result.to_dict(), "run_id": run_id})
+
+    @app.post("/api/sessions/<sid>/quick/<action>")
+    def api_session_quick(sid: str, action: str):
+        """Run a preset recipe of read-only commands (whoami, hashdump...).
+
+        Preset recipes do not need `confirm_authorized` because they
+        are limited to enumerated read-only commands defined in
+        QUICK_ACTIONS in session_manager.
+        """
+        from exploit_engine.session_manager import SessionManagerError
+
+        timeout = float((request.get_json(silent=True) or {}).get("timeout") or 8.0)
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+
+        try:
+            results = mgr.quick_action(sid, action, timeout=timeout)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        # One audit row covering the whole recipe.
+        joined = "\n".join(
+            f"$ {r.command}\n{r.output}".rstrip() for r in results
+        )
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if scan is None:
+                scan = Scan(
+                    target=f"session-{sid}", operator="web-user",
+                    mode="exploit", status="adhoc-session",
+                )
+                s.add(scan); s.flush()
+            audit = ExploitRun(
+                scan_id=scan.id,
+                module=f"session/{sid}",
+                action=f"session_quick:{action}",
+                options=str([r.command for r in results])[:500],
+                status="completed",
+                safe_mode=True,
+                result=joined[-4000:],
+            )
+            s.add(audit); s.flush()
+            run_id = audit.id
+
+        log.info("session %s quick=%s ran %d cmds (run #%s)",
+                 sid, action, len(results), run_id)
+        return jsonify({
+            "sid": sid, "action": action, "run_id": run_id,
+            "results": [r.to_dict() for r in results],
+        })
+
+    @app.post("/api/sessions/<sid>/kill")
+    def api_session_kill(sid: str):
+        """Terminate a session.
+
+        Required body: {confirm_authorized: true}
+        """
+        from exploit_engine.session_manager import SessionManagerError
+
+        payload = request.get_json(silent=True) or {}
+        if not bool(payload.get("confirm_authorized")):
+            return jsonify({
+                "error": "Refusing to kill session without authorization.",
+            }), 403
+
+        mgr, err = _session_manager_or_503()
+        if err:
+            return err
+
+        try:
+            ok = mgr.kill(sid)
+        except SessionManagerError as exc:
+            return jsonify({"error": str(exc)}), 502
+
+        log.info("session %s kill -> %s", sid, "ok" if ok else "failed")
+        return jsonify({"sid": sid, "killed": bool(ok)})
+
+    # ----------------- REST: nuclei tab -----------------
+    # Nuclei is a probe-only template scanner; it does NOT need the
+    # exploit env-var gate (VULNPILOT_ALLOW_EXPLOIT). It still requires
+    # `confirm_authorized` and runs through `require_authorization`
+    # under mode='audit' so it shares the operator-acknowledgement
+    # contract used by the scan endpoint.
+
+    @app.get("/api/nuclei/status")
+    def api_nuclei_status():
+        from exploit_engine.nuclei_runner import nuclei_status
+        return jsonify(nuclei_status())
+
+    @app.get("/api/nuclei/presets")
+    def api_nuclei_presets():
+        from exploit_engine.nuclei_runner import list_template_presets
+        return jsonify(list_template_presets())
+
+    @app.get("/api/nuclei/runs")
+    def api_nuclei_runs():
+        """Recent nuclei runs (filter ExploitRun where module starts with 'nuclei/')."""
+        try:
+            limit = max(1, min(int(request.args.get("limit", 30)), 100))
+        except ValueError:
+            limit = 30
+        with session_scope() as s:
+            rows = s.execute(
+                select(ExploitRun)
+                .where(ExploitRun.module.like("nuclei/%"))
+                .order_by(desc(ExploitRun.id))
+                .limit(limit)
+            ).scalars().all()
+            return jsonify([
+                {
+                    "id":           r.id,
+                    "scan_id":      r.scan_id,
+                    "module":       r.module,
+                    "action":       r.action,
+                    "status":       r.status,
+                    "options":      r.options,
+                    "created_at":   r.created_at.isoformat() if r.created_at else None,
+                    "result_excerpt": (r.result or "")[:280],
+                }
+                for r in rows
+            ])
+
+    @app.get("/api/nuclei/runs/<int:run_id>")
+    def api_nuclei_run_detail(run_id: int):
+        with session_scope() as s:
+            r = s.get(ExploitRun, run_id)
+            if not r or not (r.module or "").startswith("nuclei/"):
+                return jsonify({"error": "not found"}), 404
+            return jsonify({
+                "id":         r.id,
+                "scan_id":    r.scan_id,
+                "module":     r.module,
+                "action":     r.action,
+                "status":     r.status,
+                "options":    r.options,
+                "result":     r.result or "",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            })
+
+    @app.post("/api/nuclei/scan")
+    def api_nuclei_scan():
+        """Run a nuclei scan against `target`.
+
+        Body fields:
+            target              (required) - URL or host
+            presets             list of preset ids (default: ['cves'])
+            severities          list of nuclei severity levels
+                                (default: ['critical', 'high'])
+            confirm_authorized  must be true
+            authorization_ref   free-text audit reference
+            operator            free-text operator id
+            timeout             wall-clock seconds (default 180, max 600)
+            max_findings        cap on returned findings (default 500)
+        """
+        from exploit_engine.nuclei_runner import (
+            NucleiRequest, run_nuclei_scan, sort_findings,
+        )
+
+        payload: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+        target = (payload.get("target") or "").strip()
+        confirm = bool(payload.get("confirm_authorized"))
+        operator = payload.get("operator") or "web-user"
+        presets = payload.get("presets") or ["cves"]
+        severities = payload.get("severities") or ["critical", "high"]
+
+        if not target:
+            return jsonify({"error": "target is required"}), 400
+        if not confirm:
+            return jsonify({
+                "error": ("Refusing to run scan without explicit "
+                          "authorization. Tick the auth box."),
+            }), 403
+
+        try:
+            require_authorization(
+                target, operator=operator, mode="audit",
+                non_interactive=True,
+                written_auth_ref=payload.get("authorization_ref") or "ui-nuclei",
+            )
+        except AuthorizationError as exc:
+            return jsonify({"error": str(exc)}), 403
+
+        try:
+            timeout = max(10.0, min(float(payload.get("timeout") or 180.0), 600.0))
+        except (TypeError, ValueError):
+            timeout = 180.0
+        try:
+            max_findings = max(10, min(int(payload.get("max_findings") or 500), 2000))
+        except (TypeError, ValueError):
+            max_findings = 500
+
+        req = NucleiRequest(
+            target=target,
+            preset_ids=list(presets),
+            severities=list(severities),
+            timeout=timeout,
+            max_findings=max_findings,
+        )
+
+        # Resolve a Scan row for FK satisfaction (reuse latest, else
+        # create a synthetic placeholder).
+        with session_scope() as s:
+            scan = s.execute(
+                select(Scan).order_by(desc(Scan.id)).limit(1)
+            ).scalar_one_or_none()
+            if scan is None:
+                scan = Scan(
+                    target=target, operator=operator, mode="audit",
+                    status="adhoc-nuclei",
+                )
+                s.add(scan); s.flush()
+            scan_id = scan.id
+
+        # Persist a 'running' audit row so the trail survives crashes.
+        with session_scope() as s:
+            run = ExploitRun(
+                scan_id=scan_id,
+                module=f"nuclei/{','.join(req.preset_ids) or 'default'}",
+                action="nuclei_scan",
+                options=str({
+                    "target":     target,
+                    "presets":    req.preset_ids,
+                    "severities": req.severities,
+                    "timeout":    timeout,
+                })[:500],
+                status="running",
+                safe_mode=True,
+                result="(in progress)",
+            )
+            s.add(run); s.flush()
+            run_id = run.id
+
+        log.info("nuclei scan starting (run #%s) target=%s presets=%s",
+                 run_id, target, req.preset_ids)
+
+        result = run_nuclei_scan(req)
+        result.findings = sort_findings(result.findings)
+
+        # Build a compact text summary for the audit row.
+        counts = result.severity_counts()
+        summary_lines = [
+            f"target={target}",
+            f"presets={','.join(req.preset_ids) or '(default)'}",
+            f"severities={','.join(req.severities)}",
+            f"duration={result.duration_seconds:.1f}s",
+            f"return_code={result.return_code}",
+            f"findings={len(result.findings)} "
+            f"(crit={counts['critical']}, high={counts['high']}, "
+            f"med={counts['medium']}, low={counts['low']}, info={counts['info']})",
+        ]
+        if result.truncated:
+            summary_lines.append("[truncated]")
+        if result.error:
+            summary_lines.append(f"error={result.error}")
+        for f in result.findings[:50]:
+            summary_lines.append(
+                f"  [{f.severity}] {f.template_id}  ->  {f.matched_at}"
+            )
+        summary = "\n".join(summary_lines)
+
+        with session_scope() as s:
+            row = s.get(ExploitRun, run_id)
+            if row is not None:
+                if result.error:
+                    row.status = "error"
+                elif result.return_code != 0 and not result.findings:
+                    row.status = "error"
+                else:
+                    row.status = "completed"
+                row.result = summary[-4000:]
+
+        log.info("nuclei scan #%s finished status=%s findings=%d in %.1fs",
+                 run_id, ("error" if result.error else "completed"),
+                 len(result.findings), result.duration_seconds)
+
+        return jsonify({"run_id": run_id, **result.to_dict()})
 
     # ----------------- Error handlers -----------------
     @app.errorhandler(500)
