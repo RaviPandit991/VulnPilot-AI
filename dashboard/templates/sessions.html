@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% block title %}Sessions{% endblock %}
+
+{% block content %}
+<div class="flex flex-col h-full gap-4" x-data="sessionsPage()" x-init="init()">
+
+  {# ============================================================ #}
+  {#  STATUS + AUTH                                                #}
+  {# ============================================================ #}
+  <section class="panel">
+    <div class="panel-header px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-cyan-400 font-mono text-xs font-bold">01</span>
+        <i data-lucide="terminal" class="w-4 h-4 text-cyan-400"></i>
+        <h2 class="text-sm font-semibold tracking-wide">LIVE SESSIONS</h2>
+        <span class="text-xs text-slate-500" x-text="sessions.length + ' active'"></span>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <span :class="meta.msf_enabled ? 'text-emerald-300' : 'text-red-300'"
+              class="flex items-center gap-1">
+          <i data-lucide="circle"
+             :class="meta.msf_enabled ? 'text-emerald-400' : 'text-red-400'"
+             class="w-2 h-2 fill-current"></i>
+          <span x-text="meta.msf_enabled ? 'msfrpcd live' : 'msfrpcd offline'"></span>
+        </span>
+        <span class="text-slate-500">·</span>
+        <button class="btn btn-ghost !py-1 !px-2" @click="refresh()">
+          <i data-lucide="refresh-cw" class="w-3 h-3"></i>
+          <span x-text="loading ? '...' : 'refresh'"></span>
+        </button>
+      </div>
+    </div>
+
+    <div class="px-4 py-3 flex items-center justify-between gap-3 flex-wrap text-xs border-t border-ink-700/60">
+      <label class="flex items-center gap-2 cursor-pointer select-none">
+        <input type="checkbox" class="accent-cyan-400" x-model="auth" />
+        <span :class="auth ? 'text-cyan-300' : 'text-amber-300'">
+          <i data-lucide="lock-open" class="inline w-3 h-3 -mt-0.5" x-show="auth"></i>
+          <i data-lucide="lock" class="inline w-3 h-3 -mt-0.5" x-show="!auth"></i>
+          <span x-text="auth ? 'Authorized to drive sessions' : 'Tick to enable command exec / kill'"></span>
+        </span>
+      </label>
+      <div class="text-[0.65rem] text-slate-500" x-show="meta.error" x-text="meta.error"></div>
+    </div>
+  </section>
+
+  {# ============================================================ #}
+  {#  SESSION LIST  +  TERMINAL                                    #}
+  {# ============================================================ #}
+  <div class="grid grid-cols-1 xl:grid-cols-[0.9fr_1.4fr] gap-4 flex-1 min-h-0">
+
+    {# -- session list -- #}
+    <section class="panel flex flex-col min-h-0">
+      <div class="panel-header px-4 py-3 flex items-center gap-2">
+        <span class="text-cyan-400 font-mono text-xs font-bold">02</span>
+        <i data-lucide="list" class="w-4 h-4 text-cyan-400"></i>
+        <h2 class="text-sm font-semibold tracking-wide">SESSIONS</h2>
+      </div>
+      <div class="flex-1 overflow-y-auto p-3 space-y-2">
+        <template x-for="s in sessions" :key="s.sid">
+          <button type="button"
+                  class="w-full text-left bg-ink-900/60 border rounded-md p-3 transition hover:border-cyan-500/40"
+                  :class="selected && selected.sid === s.sid
+                          ? 'border-cyan-500/60 ring-1 ring-cyan-500/30'
+                          : 'border-ink-700/60'"
+                  @click="select(s)">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-mono text-cyan-300 text-sm" x-text="'#' + s.sid"></span>
+                  <span class="sev"
+                        :class="s.type === 'meterpreter' ? 'sev-critical' : 'sev-high'"
+                        x-text="(s.type || '?').toUpperCase()"></span>
+                  <span class="font-mono text-xs text-slate-300"
+                        x-text="(s.target_host || '?') + (s.target_port ? ':' + s.target_port : '')"></span>
+                </div>
+                <div class="text-[0.7rem] text-slate-400 mt-1 truncate" x-text="s.via_exploit || '(unknown exploit)'"></div>
+                <div class="text-[0.65rem] text-slate-500 mt-0.5 truncate" x-text="s.info || s.via_payload"></div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="text-[0.6rem] uppercase tracking-wider text-slate-500">opened</div>
+                <div class="font-mono text-[0.65rem] text-slate-400" x-text="formatOpened(s.opened_at)"></div>
+              </div>
+            </div>
+          </button>
+        </template>
+        <template x-if="!sessions.length && !loading">
+          <div class="text-slate-600 text-xs italic text-center py-12">
+            No active sessions. Open one from the
+            <a href="/exploits" class="text-cyan-400 underline">Exploits</a> tab.
+          </div>
+        </template>
+        <template x-if="!sessions.length && loading">
+          <div class="text-slate-600 text-xs italic text-center py-12">
+            Loading from msfrpcd...
+          </div>
+        </template>
+      </div>
+    </section>
+
+    {# -- terminal -- #}
+    <section class="panel flex flex-col min-h-0">
+      <div class="panel-header px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="text-cyan-400 font-mono text-xs font-bold">03</span>
+          <i data-lucide="square-terminal" class="w-4 h-4 text-cyan-400"></i>
+          <h2 class="text-sm font-semibold tracking-wide">
+            <span x-show="!selected">TERMINAL</span>
+            <span x-show="selected"
+                  x-text="'TERMINAL · #' + (selected && selected.sid) + ' · ' + (selected && selected.type)"></span>
+          </h2>
+        </div>
+        <div class="flex items-center gap-1.5" x-show="selected">
+          <button class="btn btn-ghost !py-1 !px-2"
+                  :disabled="!auth || running"
+                  @click="confirmKill()">
+            <i data-lucide="x-circle" class="w-3 h-3 text-red-400"></i>
+            <span class="text-red-300">kill</span>
+          </button>
+          <button class="btn btn-ghost !py-1 !px-2" @click="clearScrollback()">
+            <i data-lucide="eraser" class="w-3 h-3"></i> clear
+          </button>
+        </div>
+      </div>
+
+      <template x-if="!selected">
+        <div class="flex-1 flex items-center justify-center text-slate-600 text-xs italic">
+          Pick a session on the left.
+        </div>
+      </template>
+
+      <template x-if="selected">
+        <div class="flex-1 flex flex-col min-h-0">
+
+          {# Quick actions row #}
+          <div class="px-3 py-2 border-b border-ink-700/60 flex flex-wrap gap-1.5">
+            <template x-for="qa in quickActions" :key="qa.id">
+              <button class="btn btn-ghost !py-1 !px-2 !text-xs"
+                      :disabled="running || !meta.msf_enabled"
+                      @click="runQuick(qa.id)">
+                <i :data-lucide="qa.icon" class="w-3 h-3"></i>
+                <span x-text="qa.label"></span>
+              </button>
+            </template>
+            <span class="text-[0.65rem] text-slate-500 self-center ml-auto"
+                  x-show="running"
+                  x-text="'running ' + currentCmd + '...'"></span>
+          </div>
+
+          {# Scrollback #}
+          <div class="flex-1 overflow-y-auto p-3 font-mono text-[0.7rem] leading-relaxed bg-ink-950/50"
+               x-ref="scroll">
+            <template x-for="(line, idx) in scrollback" :key="idx">
+              <div class="mb-2">
+                <div x-show="line.kind === 'cmd'"
+                     class="text-cyan-300 flex gap-2">
+                  <span class="text-cyan-500">$</span>
+                  <span x-text="line.text"></span>
+                </div>
+                <pre x-show="line.kind === 'out'"
+                     class="text-slate-200 whitespace-pre-wrap"
+                     x-text="line.text"></pre>
+                <div x-show="line.kind === 'err'"
+                     class="text-red-300 whitespace-pre-wrap"
+                     x-text="line.text"></div>
+                <div x-show="line.kind === 'sys'"
+                     class="text-amber-300 italic"
+                     x-text="line.text"></div>
+              </div>
+            </template>
+            <div x-show="!scrollback.length"
+                 class="text-slate-600 italic text-center py-8">
+              Type a command below or click a quick action.
+            </div>
+          </div>
+
+          {# Input row #}
+          <div class="border-t border-ink-700/60 p-2 flex gap-2 items-center">
+            <span class="font-mono text-cyan-500 text-xs pl-2">$</span>
+            <input class="field !py-1 !text-xs font-mono flex-1"
+                   x-model="cmdInput"
+                   :disabled="!auth || running"
+                   :placeholder="auth ? 'id; whoami; hostname' : 'tick the authorization box above to enable...'"
+                   @keydown.enter.prevent="submitCommand()"
+                   @keydown.up.prevent="recallHistory(-1)"
+                   @keydown.down.prevent="recallHistory(1)" />
+            <button class="btn btn-primary !py-1.5"
+                    :disabled="!auth || running || !cmdInput.trim()"
+                    @click="submitCommand()">
+              <i data-lucide="send" class="w-3 h-3"></i>
+              <span x-text="running ? '...' : 'send'"></span>
+            </button>
+          </div>
+        </div>
+      </template>
+    </section>
+  </div>
+
+  {# ============================================================ #}
+  {#  KILL CONFIRMATION MODAL                                      #}
+  {# ============================================================ #}
+  <template x-if="killTarget">
+    <div class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
+         @click.self="killTarget = null">
+      <div class="panel max-w-md w-full">
+        <div class="panel-header px-4 py-3 flex items-center gap-2">
+          <i data-lucide="alert-triangle" class="w-4 h-4 text-red-400"></i>
+          <h2 class="text-sm font-semibold tracking-wide text-red-300">CONFIRM SESSION KILL</h2>
+        </div>
+        <div class="p-4 space-y-3 text-xs">
+          <p>
+            Terminate session
+            <span class="font-mono text-cyan-300" x-text="'#' + killTarget.sid"></span>
+            on
+            <span class="font-mono text-amber-300"
+                  x-text="killTarget.target_host + ':' + killTarget.target_port"></span>?
+          </p>
+          <p class="text-slate-400">
+            The shell will be lost. Re-running the exploit may not produce a
+            new one if the target has rate-limit / state-machine issues.
+          </p>
+          <div class="flex justify-end gap-2 pt-2 border-t border-ink-700/60">
+            <button class="btn btn-ghost" @click="killTarget = null">cancel</button>
+            <button class="btn btn-primary !bg-red-700 hover:!bg-red-600"
+                    @click="doKill()">
+              <i data-lucide="x-circle" class="w-3 h-3"></i> kill it
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  {# ============================================================ #}
+  {#  RECENT AUDIT LOG (collapsed by default)                      #}
+  {# ============================================================ #}
+  <section class="panel" x-data="{ open: false }">
+    <button class="w-full px-4 py-3 flex items-center justify-between text-xs"
+            @click="open = !open">
+      <div class="flex items-center gap-2">
+        <i data-lucide="scroll-text" class="w-3.5 h-3.5 text-cyan-400"></i>
+        <span class="font-semibold tracking-wide text-slate-300">SESSION AUDIT TRAIL</span>
+        <span class="text-slate-500"
+              x-text="audit.length + ' rows · ' + (lastAuditAt || 'never')"></span>
+      </div>
+      <i :data-lucide="open ? 'chevron-down' : 'chevron-up'" class="w-3.5 h-3.5"></i>
+    </button>
+    <div x-show="open" class="border-t border-ink-700/60 max-h-56 overflow-y-auto">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 sticky top-0 bg-ink-900/95 backdrop-blur">
+          <tr class="border-b border-ink-700/60">
+            <th class="text-left py-2 pl-4 pr-2 font-medium">#</th>
+            <th class="text-left py-2 px-2 font-medium">Action</th>
+            <th class="text-left py-2 px-2 font-medium">Command</th>
+            <th class="text-left py-2 pr-4 font-medium">When</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="row in audit" :key="row.id">
+            <tr class="border-b border-ink-800/60 hover:bg-ink-800/30">
+              <td class="py-2 pl-4 pr-2 font-mono text-slate-400" x-text="'#' + row.id"></td>
+              <td class="py-2 px-2 font-mono text-cyan-300 truncate max-w-[10rem]"
+                  x-text="row.action"></td>
+              <td class="py-2 px-2 font-mono text-slate-400 truncate max-w-[24rem]"
+                  x-text="row.options || '—'"></td>
+              <td class="py-2 pr-4 font-mono text-slate-500"
+                  x-text="(row.created_at || '').slice(0,19).replace('T',' ')"></td>
+            </tr>
+          </template>
+          <template x-if="!audit.length">
+            <tr><td colspan="4" class="py-8 text-center text-slate-600 italic">
+              No session activity yet.
+            </td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/sessions.js') }}"></script>
+{% endblock %}
