@@ -12,6 +12,21 @@ import sys
 from dataclasses import dataclass
 from typing import Iterable
 
+
+def _lab_mode_enabled() -> bool:
+    """Return True if `safety.lab_mode` is set to true in config.yaml.
+
+    Lab mode is the operator-edited equivalent of setting both env vars
+    on every launch. The check is wrapped in a try/except so this module
+    stays importable even if settings are missing (e.g. during unit
+    tests or first-time setup before config.yaml is created).
+    """
+    try:
+        from configs.settings import get_settings  # local import - avoid cycles
+        return bool(get_settings().get("safety.lab_mode", False))
+    except Exception:
+        return False
+
 # Target ranges considered safe-by-default for lab testing.
 # Public targets must be opted-in via VULNPILOT_ALLOW_PUBLIC=1 AND user confirmation.
 _PRIVATE_NETWORKS = [
@@ -112,16 +127,32 @@ def require_authorization(
     if mode not in {"safe", "audit", "exploit"}:
         raise AuthorizationError(f"Unknown mode: {mode!r}")
 
-    if mode == "exploit" and os.environ.get("VULNPILOT_ALLOW_EXPLOIT") != "1":
+    # Lab mode (configs/config.yaml -> safety.lab_mode: true) skips the
+    # env-var gates entirely. The operator has explicitly opted in by
+    # editing the config file; we still log a one-line warning so this
+    # is never silent.
+    lab_mode = _lab_mode_enabled()
+    if lab_mode:
+        print(
+            "[auth] safety.lab_mode=true - env-var gates bypassed. "
+            "Disable in configs/config.yaml before running outside the lab.",
+            file=sys.stderr,
+        )
+
+    if (mode == "exploit"
+            and os.environ.get("VULNPILOT_ALLOW_EXPLOIT") != "1"
+            and not lab_mode):
         raise AuthorizationError(
             "Exploit mode is disabled. Set VULNPILOT_ALLOW_EXPLOIT=1 only in a "
-            "controlled lab and pass --i-have-authorization."
+            "controlled lab and pass --i-have-authorization. "
+            "(Or set safety.lab_mode: true in configs/config.yaml.)"
         )
 
     if non_interactive:
-        if os.environ.get("VULNPILOT_AUTHORIZED") != "1":
+        if os.environ.get("VULNPILOT_AUTHORIZED") != "1" and not lab_mode:
             raise AuthorizationError(
-                "Non-interactive run requires VULNPILOT_AUTHORIZED=1."
+                "Non-interactive run requires VULNPILOT_AUTHORIZED=1. "
+                "(Or set safety.lab_mode: true in configs/config.yaml.)"
             )
     else:
         if not _confirm(
